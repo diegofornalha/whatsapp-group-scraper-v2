@@ -1,0 +1,111 @@
+{
+  "schemas": {
+    "userRegistration": {
+      "username": {
+        "type": "string",
+        "required": true,
+        "min": 3,
+        "max": 30,
+        "pattern": "^[a-zA-Z0-9_]+$",
+        "sanitize": true
+      },
+      "email": {
+        "type": "email",
+        "required": true,
+        "sanitize": true
+      },
+      "password": {
+        "type": "string",
+        "required": true,
+        "min": 8,
+        "pattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]"
+      },
+      "phoneNumber": {
+        "type": "string",
+        "required": true,
+        "pattern": "^\\+?[1-9]\\d{1,14}$"
+      }
+    },
+    "userLogin": {
+      "email": {
+        "type": "email",
+        "required": true,
+        "sanitize": true
+      },
+      "password": {
+        "type": "string",
+        "required": true
+      },
+      "rememberMe": {
+        "type": "boolean",
+        "required": false
+      }
+    },
+    "messageCreate": {
+      "content": {
+        "type": "string",
+        "required": true,
+        "min": 1,
+        "max": 5000,
+        "sanitize": true
+      },
+      "type": {
+        "type": "string",
+        "required": true,
+        "enum": ["text", "image", "video", "audio", "document"]
+      },
+      "recipientId": {
+        "type": "string",
+        "required": true,
+        "pattern": "^[a-zA-Z0-9-]+$"
+      },
+      "metadata": {
+        "type": "object",
+        "required": false
+      }
+    },
+    "fileUpload": {
+      "fileName": {
+        "type": "string",
+        "required": true,
+        "max": 255,
+        "sanitize": true
+      },
+      "fileType": {
+        "type": "string",
+        "required": true,
+        "enum": ["image/jpeg", "image/png", "image/gif", "video/mp4", "audio/mpeg", "application/pdf"]
+      },
+      "fileSize": {
+        "type": "number",
+        "required": true,
+        "min": 1,
+        "max": 52428800
+      }
+    },
+    "profileUpdate": {
+      "displayName": {
+        "type": "string",
+        "required": false,
+        "min": 1,
+        "max": 50,
+        "sanitize": true
+      },
+      "bio": {
+        "type": "string",
+        "required": false,
+        "max": 500,
+        "sanitize": true
+      },
+      "avatar": {
+        "type": "url",
+        "required": false,
+        "sanitize": true
+      },
+      "preferences": {
+        "type": "object",
+        "required": false
+      }
+    }
+  }
+}

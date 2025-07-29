@@ -1,0 +1,133 @@
+{
+  "authentication": {
+    "passwordPolicy": {
+      "minLength": 8,
+      "requireUppercase": true,
+      "requireLowercase": true,
+      "requireNumbers": true,
+      "requireSpecialChars": true,
+      "preventReuse": 5,
+      "expirationDays": 90,
+      "complexityScore": 3
+    },
+    "sessionPolicy": {
+      "timeout": 1800000,
+      "absoluteTimeout": 86400000,
+      "renewalThreshold": 300000,
+      "concurrentSessions": 3,
+      "bindToIp": false
+    },
+    "mfaPolicy": {
+      "required": false,
+      "methods": ["totp", "sms", "email"],
+      "gracePeriod": 604800000,
+      "rememberDevice": true
+    },
+    "lockoutPolicy": {
+      "maxAttempts": 5,
+      "lockoutDuration": 900000,
+      "resetAfter": 3600000,
+      "notifyUser": true
+    }
+  },
+  "authorization": {
+    "rbac": {
+      "enabled": true,
+      "defaultRole": "user",
+      "roleHierarchy": true
+    },
+    "permissions": {
+      "granularity": "resource",
+      "inheritance": true,
+      "caching": true
+    }
+  },
+  "dataProtection": {
+    "encryption": {
+      "atRest": {
+        "enabled": true,
+        "algorithm": "aes-256-gcm",
+        "keyRotation": 7776000000
+      },
+      "inTransit": {
+        "enabled": true,
+        "minTlsVersion": "1.2",
+        "cipherSuites": ["TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"]
+      }
+    },
+    "dataClassification": {
+      "levels": ["public", "internal", "confidential", "restricted"],
+      "defaultLevel": "internal",
+      "labeling": true
+    },
+    "retention": {
+      "defaultDays": 90,
+      "byClassification": {
+        "public": 30,
+        "internal": 90,
+        "confidential": 365,
+        "restricted": 2555
+      }
+    }
+  },
+  "networkSecurity": {
+    "firewall": {
+      "defaultAction": "deny",
+      "rules": [
+        {
+          "name": "allow-https",
+          "protocol": "tcp",
+          "port": 443,
+          "action": "allow"
+        },
+        {
+          "name": "allow-internal",
+          "source": "10.0.0.0/8",
+          "action": "allow"
+        }
+      ]
+    },
+    "cors": {
+      "enabled": true,
+      "origins": ["https://app.example.com"],
+      "credentials": true,
+      "maxAge": 86400
+    },
+    "headers": {
+      "X-Frame-Options": "DENY",
+      "X-Content-Type-Options": "nosniff",
+      "X-XSS-Protection": "1; mode=block",
+      "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+      "Content-Security-Policy": "default-src 'self'"
+    }
+  },
+  "monitoring": {
+    "realtime": {
+      "enabled": true,
+      "alertThresholds": {
+        "failedLogins": 10,
+        "suspiciousActivity": 5,
+        "dataExfiltration": 1
+      }
+    },
+    "reporting": {
+      "schedule": "daily",
+      "recipients": ["security@example.com"],
+      "includeMetrics": true
+    }
+  },
+  "incidentResponse": {
+    "automation": {
+      "enabled": true,
+      "actions": {
+        "highSeverity": ["lockAccount", "notifyAdmin", "createTicket"],
+        "criticalSeverity": ["lockAccount", "blockIp", "pageOncall"]
+      }
+    },
+    "playbooks": {
+      "dataBreachPath": "/security/playbooks/data-breach.md",
+      "ddosPath": "/security/playbooks/ddos.md",
+      "malwarePath": "/security/playbooks/malware.md"
+    }
+  }
+}

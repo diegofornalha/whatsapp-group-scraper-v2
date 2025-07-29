@@ -1,0 +1,62 @@
+{
+  "formats": {
+    "authentication": {
+      "fields": ["timestamp", "eventId", "userId", "action", "result", "ipAddress", "userAgent", "sessionId"],
+      "sensitive": ["password", "token"],
+      "retention": 180
+    },
+    "dataAccess": {
+      "fields": ["timestamp", "eventId", "userId", "resource", "action", "result", "dataSize", "responseTime"],
+      "sensitive": ["data"],
+      "retention": 90
+    },
+    "dataModification": {
+      "fields": ["timestamp", "eventId", "userId", "resource", "action", "oldValue", "newValue", "changeType"],
+      "sensitive": ["oldValue", "newValue"],
+      "retention": 365
+    },
+    "securityEvent": {
+      "fields": ["timestamp", "eventId", "severity", "type", "description", "source", "target", "action"],
+      "sensitive": [],
+      "retention": 730
+    },
+    "apiAccess": {
+      "fields": ["timestamp", "eventId", "userId", "endpoint", "method", "statusCode", "responseTime", "requestSize"],
+      "sensitive": ["requestBody", "responseBody"],
+      "retention": 30
+    }
+  },
+  "exportFormats": {
+    "json": {
+      "pretty": true,
+      "includeMetadata": true
+    },
+    "csv": {
+      "delimiter": ",",
+      "includeHeaders": true,
+      "escapeQuotes": true
+    },
+    "syslog": {
+      "facility": 16,
+      "severity": "info",
+      "hostname": true
+    }
+  },
+  "compliance": {
+    "gdpr": {
+      "enabled": true,
+      "anonymizeAfter": 90,
+      "excludeFields": ["userId", "email", "ipAddress"]
+    },
+    "hipaa": {
+      "enabled": false,
+      "encryptAtRest": true,
+      "encryptInTransit": true
+    },
+    "pci": {
+      "enabled": false,
+      "maskCreditCards": true,
+      "retentionDays": 365
+    }
+  }
+}

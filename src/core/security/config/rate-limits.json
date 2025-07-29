@@ -1,0 +1,50 @@
+{
+  "endpoints": {
+    "/api/auth/login": {
+      "windowMs": 900000,
+      "maxRequests": 5,
+      "message": "Too many login attempts, please try again later"
+    },
+    "/api/auth/register": {
+      "windowMs": 3600000,
+      "maxRequests": 3,
+      "message": "Too many registration attempts, please try again later"
+    },
+    "/api/messages": {
+      "windowMs": 60000,
+      "maxRequests": 100,
+      "message": "Message rate limit exceeded"
+    },
+    "/api/files/upload": {
+      "windowMs": 300000,
+      "maxRequests": 10,
+      "message": "File upload rate limit exceeded"
+    },
+    "/api/search": {
+      "windowMs": 60000,
+      "maxRequests": 30,
+      "message": "Search rate limit exceeded"
+    }
+  },
+  "global": {
+    "windowMs": 60000,
+    "maxRequests": 100,
+    "skipSuccessfulRequests": false,
+    "skipFailedRequests": false
+  },
+  "ipWhitelist": [
+    "127.0.0.1",
+    "::1"
+  ],
+  "userRoles": {
+    "admin": {
+      "multiplier": 10
+    },
+    "premium": {
+      "multiplier": 5
+    },
+    "basic": {
+      "multiplier": 1
+    }
+  }
+}

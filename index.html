@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Group Scraper</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #25D366;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .description {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            border-left: 4px solid #25D366;
+        }
+        .instructions {
+            background: #fff3e0;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        .instructions h3 {
+            color: #f57c00;
+            margin-top: 0;
+        }
+        .instructions ol {
+            line-height: 1.6;
+        }
+        .script-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+        }
+        .load-script-btn {
+            background: #25D366;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        .load-script-btn:hover {
+            background: #20b954;
+        }
+        .warning {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 20px;
+            border-left: 4px solid #f44336;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 WhatsApp Group Scraper</h1>
+        
+        <div class="description">
+            <p><strong>Este é um scraper para extrair informações de grupos do WhatsApp Web.</strong></p>
+            <p>O script permite coletar dados de membros de grupos, incluindo nomes, descrições e números de telefone quando disponíveis.</p>
+        </div>
+
+        <div class="instructions">
+            <h3>📋 Como usar:</h3>
+            <ol>
+                <li>Abra o <strong>WhatsApp Web</strong> em outra aba</li>
+                <li>Navegue até o grupo que deseja fazer scraping</li>
+                <li>Clique no botão abaixo para carregar o script</li>
+                <li>Volte para a aba do WhatsApp Web</li>
+                <li>O script será executado automaticamente</li>
+                <li>Os dados serão coletados e você poderá fazer o download</li>
+            </ol>
+        </div>
+
+        <div class="script-section">
+            <h3>⚡ Carregar Script</h3>
+            <p>Clique no botão abaixo para carregar o script de scraping:</p>
+            <button class="load-script-btn" onclick="loadScript()">
+                Carregar WhatsApp Scraper
+            </button>
+            
+            <div class="warning">
+                <strong>⚠️ Aviso:</strong> Este script deve ser usado apenas em grupos onde você tem permissão para coletar dados. Respeite a privacidade dos usuários e as políticas do WhatsApp.
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        window.loadScript = function() {
+            // Carrega o script principal
+            import('./src/main.ts').then((module) => {
+                console.log('✅ WhatsApp Scraper carregado com sucesso!');
+                console.log('📱 Agora vá para o WhatsApp Web e o script será executado automaticamente.');
+                alert('✅ Script carregado! Agora vá para o WhatsApp Web.');
+            }).catch((error) => {
+                console.error('❌ Erro ao carregar o script:', error);
+                alert('❌ Erro ao carregar o script. Verifique o console para mais detalhes.');
+            });
+        };
+    </script>
+</body>
+</html>
