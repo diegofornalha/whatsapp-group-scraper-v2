@@ -29,31 +29,19 @@ function waitForWhatsApp() {
 
 // Injeta o botão simples
 function injectButton() {
-  // Verifica se já existe
-  if (document.getElementById('whatsapp-scraper-button')) {
+  // Verifica se já foi carregado
+  if (document.getElementById('whatsapp-scraper-widget')) {
+    console.log('⚠️ WhatsApp Scraper já está carregado');
     return;
   }
   
-  // Cria container do botão
-  const container = document.createElement('div');
-  container.id = 'whatsapp-scraper-container';
-  container.innerHTML = `
-    <div class="scraper-header">
-      <span class="scraper-icon">⚡</span>
-      <h3>Carregar Script</h3>
-    </div>
-    <p class="scraper-description">Clique no botão abaixo para carregar o script de scraping:</p>
-    <button id="whatsapp-scraper-button">
-      Carregar WhatsApp Scraper
-    </button>
-  `;
+  console.log('⚡ WhatsApp Scraper: Carregando automaticamente...');
   
-  document.body.appendChild(container);
-  
-  // Adiciona evento ao botão
-  document.getElementById('whatsapp-scraper-button').addEventListener('click', loadScraper);
-  
-  console.log('✅ WhatsApp Scraper: Botão injetado com sucesso!');
+  // Carrega o scraper diretamente, sem mostrar o modal
+  setTimeout(() => {
+    initializeScraper();
+    console.log('✅ WhatsApp Scraper: Carregado automaticamente!');
+  }, 500);
 }
 
 // Funções utilitárias
@@ -271,6 +259,8 @@ async function updateCounter() {
 }
 
 // Carrega o scraper quando o botão é clicado
+// NOTA: Esta função não é mais usada pois o scraper carrega automaticamente
+// Mantida para compatibilidade/referência
 function loadScraper() {
   const button = document.getElementById('whatsapp-scraper-button');
   const container = document.getElementById('whatsapp-scraper-container');
