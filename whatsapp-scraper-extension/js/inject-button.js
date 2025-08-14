@@ -195,6 +195,18 @@ class WhatsAppStorage extends ListStorage {
     return rows;
   }
   
+  // Novo método para exportar todos os contatos sem filtro
+  toCsvDataRaw() {
+    const rows = [this.headers];
+    this.data.forEach(item => {
+      rows.push([
+        item.phoneNumber || "",
+        item.name || "" // Nome completo sem tratamento
+      ]);
+    });
+    return rows;
+  }
+  
   addElem(id, data, update) {
     const existing = this.data.find(item => item.profileId === id);
     if (existing && update) {
@@ -211,9 +223,21 @@ class WhatsAppStorage extends ListStorage {
 
 async function updateCounter() {
   const tracker = document.getElementById(counterId);
+  const trackerFiltered = document.getElementById(counterId + '-filtered');
+  
   if(tracker){
     const countValue = memberListStore.getCount();
     tracker.textContent = countValue.toString();
+  }
+  
+  if(trackerFiltered){
+    // Contar apenas os contatos que passariam pelo filtro
+    let filteredCount = 0;
+    memberListStore.data.forEach(item => {
+      const row = memberListStore.itemToRow(item);
+      if (row) filteredCount++;
+    });
+    trackerFiltered.textContent = filteredCount.toString();
   }
 }
 
@@ -254,28 +278,56 @@ function initializeScraper() {
   // History Tracker
   logsTracker = new HistoryTracker();
   
-  // Button Download
-  const btnDownload = createCta('Download 0 users');
-  btnDownload.onclick = async function() {
+  // Button Download Tratado (Filtrado)
+  const btnDownloadFiltered = createCta('Download Filtrado');
+  btnDownloadFiltered.onclick = async function() {
     const timestamp = new Date().toISOString();
     const data = memberListStore.toCsvData();
     try{
-      exportToCsv(data, exportName + '-' + timestamp + '.csv');
+      exportToCsv(data, exportName + '-filtrado-' + timestamp + '.csv');
+      console.log('✅ CSV filtrado exportado com sucesso');
     }catch(err){
-      console.error('Error while generating export');
+      console.error('Error while generating filtered export');
       console.log(err.stack);
     }
   };
   
-  // Criar span para o contador dentro do botão
-  btnDownload.innerHTML = '';
-  btnDownload.appendChild(createTextSpan('Download '));
+  // Criar span para o contador dentro do botão filtrado
+  btnDownloadFiltered.innerHTML = '';
+  btnDownloadFiltered.appendChild(createTextSpan('📋 Filtrado ('));
+  const counterSpanFiltered = createTextSpan('0');
+  counterSpanFiltered.id = counterId + '-filtered';
+  btnDownloadFiltered.appendChild(counterSpanFiltered);
+  btnDownloadFiltered.appendChild(createTextSpan(')')); 
+  btnDownloadFiltered.style.backgroundColor = '#25D366';
+  btnDownloadFiltered.style.marginBottom = '5px';
+  
+  // Button Download Completo (Sem Tratamento)
+  const btnDownloadRaw = createCta('Download Completo');
+  btnDownloadRaw.onclick = async function() {
+    const timestamp = new Date().toISOString();
+    const data = memberListStore.toCsvDataRaw();
+    try{
+      exportToCsv(data, exportName + '-completo-' + timestamp + '.csv');
+      console.log('✅ CSV completo exportado com sucesso');
+    }catch(err){
+      console.error('Error while generating raw export');
+      console.log(err.stack);
+    }
+  };
+  
+  // Criar span para o contador dentro do botão completo
+  btnDownloadRaw.innerHTML = '';
+  btnDownloadRaw.appendChild(createTextSpan('📄 Completo ('));
   const counterSpan = createTextSpan('0');
   counterSpan.id = counterId;
-  btnDownload.appendChild(counterSpan);
-  btnDownload.appendChild(createTextSpan(' users'));
+  btnDownloadRaw.appendChild(counterSpan);
+  btnDownloadRaw.appendChild(createTextSpan(')'));
+  btnDownloadRaw.style.backgroundColor = '#128C7E';
+  btnDownloadRaw.style.marginBottom = '10px';
   
-  uiWidget.appendChild(btnDownload);
+  uiWidget.appendChild(btnDownloadFiltered);
+  uiWidget.appendChild(btnDownloadRaw);
   uiWidget.appendChild(createSpacer());
   
   // Button Reset
