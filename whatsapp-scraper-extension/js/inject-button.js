@@ -8,6 +8,14 @@ let modalObserver;
 const counterId = 'scraper-number-tracker';
 const exportName = 'whatsAppExport';
 
+// Lista de nomes a serem excluídos na exportação
+const EXCLUDED_NAMES = ['Você', 'Ramon Socio', 'You'];
+
+// Função helper para verificar se deve excluir o contato
+function shouldExclude(name) {
+  return !name || EXCLUDED_NAMES.includes(name);
+}
+
 // Aguarda o WhatsApp carregar
 function waitForWhatsApp() {
   const checkInterval = setInterval(() => {
@@ -151,6 +159,10 @@ class WhatsAppStorage extends ListStorage {
   }
   
   itemToRow(item) {
+    // Ignorar contatos sem nome ou contatos próprios
+    if (shouldExclude(item.name)) {
+      return null; // Retornar null para indicar que deve ser ignorado
+    }
     return [
       item.phoneNumber || "",
       item.name ? item.name.split(' ')[0] : ""
@@ -160,7 +172,10 @@ class WhatsAppStorage extends ListStorage {
   toCsvData() {
     const rows = [this.headers];
     this.data.forEach(item => {
-      rows.push(this.itemToRow(item));
+      const row = this.itemToRow(item);
+      if (row) { // Apenas adicionar se não for null
+        rows.push(row);
+      }
     });
     return rows;
   }
@@ -331,6 +346,12 @@ function listenModalChanges() {
           }
           
           if(profileName){
+            // Ignorar contatos próprios e sem nome válido
+            if (shouldExclude(profileName)) {
+              console.log('Ignorando contato próprio ou inválido:', profileName);
+              return;
+            }
+            
             const identifier = profilePhone ? profilePhone : profileName;
             console.log('Encontrado:', identifier);
             
