@@ -23,7 +23,7 @@ interface GroupInfo {
 }
 
 // Lista de nomes a serem excluídos na exportação
-const EXCLUDED_NAMES = ['Você', 'Ramon Socio', 'You'];
+const EXCLUDED_NAMES = ['Você', 'Ramon Socio', 'You', 'Luciana Siguemoto Agentes'];
 
 // Função helper para verificar se deve excluir o contato
 function shouldExclude(name?: string): boolean {
@@ -61,6 +61,21 @@ class WhatsAppStorage extends ListStorage<WhatsAppMember> {
         if (shouldExclude(item.name)) {
             return null; // Retornar null para indicar que deve ser ignorado
         }
+        
+        // Também verificar se o phoneNumber contém um nome excluído (quando não há telefone real)
+        if (!item.name && item.phoneNumber) {
+            // Se não tem nome mas o phoneNumber não parece ser um telefone (não começa com + ou número)
+            if (!/^[+\d]/.test(item.phoneNumber)) {
+                // É um nome no campo phoneNumber, verificar se deve excluir
+                if (shouldExclude(item.phoneNumber)) {
+                    return null;
+                }
+            } else {
+                // É um número sem nome, filtrar
+                return null;
+            }
+        }
+        
         return [
             item.phoneNumber ? item.phoneNumber : "",
             item.name ? item.name.split(' ')[0] : "",
