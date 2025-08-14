@@ -207,6 +207,21 @@ class WhatsAppStorage extends ListStorage {
     return rows;
   }
   
+  // Novo método para exportar apenas contatos sem nome (números apenas)
+  toCsvDataNoName() {
+    const rows = [["Phone Number"]]; // Apenas coluna de telefone
+    this.data.forEach(item => {
+      // Incluir apenas se não tem nome ou se o nome está na lista de exclusão
+      if (!item.name || item.name.trim() === '') {
+        // Verificar se phoneNumber é realmente um número (começa com + ou dígito)
+        if (item.phoneNumber && /^[+\d]/.test(item.phoneNumber)) {
+          rows.push([item.phoneNumber]);
+        }
+      }
+    });
+    return rows;
+  }
+  
   addElem(id, data, update) {
     const existing = this.data.find(item => item.profileId === id);
     if (existing && update) {
@@ -224,6 +239,7 @@ class WhatsAppStorage extends ListStorage {
 async function updateCounter() {
   const tracker = document.getElementById(counterId);
   const trackerFiltered = document.getElementById(counterId + '-filtered');
+  const trackerNoName = document.getElementById(counterId + '-noname');
   
   if(tracker){
     const countValue = memberListStore.getCount();
@@ -238,6 +254,19 @@ async function updateCounter() {
       if (row) filteredCount++;
     });
     trackerFiltered.textContent = filteredCount.toString();
+  }
+  
+  if(trackerNoName){
+    // Contar apenas contatos sem nome
+    let noNameCount = 0;
+    memberListStore.data.forEach(item => {
+      if (!item.name || item.name.trim() === '') {
+        if (item.phoneNumber && /^[+\d]/.test(item.phoneNumber)) {
+          noNameCount++;
+        }
+      }
+    });
+    trackerNoName.textContent = noNameCount.toString();
   }
 }
 
@@ -324,10 +353,35 @@ function initializeScraper() {
   btnDownloadRaw.appendChild(counterSpan);
   btnDownloadRaw.appendChild(createTextSpan(')'));
   btnDownloadRaw.style.backgroundColor = '#128C7E';
-  btnDownloadRaw.style.marginBottom = '10px';
+  btnDownloadRaw.style.marginBottom = '5px';
+  
+  // Button Download Sem Nome (Apenas Números)
+  const btnDownloadNoName = createCta('Download Sem Nome');
+  btnDownloadNoName.onclick = async function() {
+    const timestamp = new Date().toISOString();
+    const data = memberListStore.toCsvDataNoName();
+    try{
+      exportToCsv(data, exportName + '-sem-nome-' + timestamp + '.csv');
+      console.log('✅ CSV sem nome exportado com sucesso');
+    }catch(err){
+      console.error('Error while generating no-name export');
+      console.log(err.stack);
+    }
+  };
+  
+  // Criar span para o contador dentro do botão sem nome
+  btnDownloadNoName.innerHTML = '';
+  btnDownloadNoName.appendChild(createTextSpan('📱 Sem Nome ('));
+  const counterSpanNoName = createTextSpan('0');
+  counterSpanNoName.id = counterId + '-noname';
+  btnDownloadNoName.appendChild(counterSpanNoName);
+  btnDownloadNoName.appendChild(createTextSpan(')'));
+  btnDownloadNoName.style.backgroundColor = '#E67E22';
+  btnDownloadNoName.style.marginBottom = '10px';
   
   uiWidget.appendChild(btnDownloadFiltered);
   uiWidget.appendChild(btnDownloadRaw);
+  uiWidget.appendChild(btnDownloadNoName);
   uiWidget.appendChild(createSpacer());
   
   // Button Reset
@@ -339,6 +393,19 @@ function initializeScraper() {
   };
   
   uiWidget.appendChild(btnReinit);
+  
+  // Button Ir para Disparador
+  const btnDisparador = createCta('Ir para Disparador');
+  btnDisparador.style.marginTop = '10px';
+  btnDisparador.style.backgroundColor = '#0066cc';
+  btnDisparador.style.color = 'white';
+  btnDisparador.onclick = function() {
+    // Abrir o disparador em nova aba
+    window.open('https://web.whatsapp.com/', '_blank');
+    console.log('Redirecionando para o disparador...');
+  };
+  
+  uiWidget.appendChild(btnDisparador);
   uiWidget.appendChild(createSpacer());
   
   // Status text
