@@ -153,7 +153,7 @@ class WhatsAppStorage extends ListStorage {
   itemToRow(item) {
     return [
       item.phoneNumber || "",
-      item.name || ""
+      item.name ? item.name.split(' ')[0] : ""
     ];
   }
   

@@ -48,7 +48,7 @@ class WhatsAppStorage extends ListStorage<WhatsAppMember> {
     itemToRow(item: WhatsAppMember): string[]{
         return [
             item.phoneNumber ? item.phoneNumber : "",
-            item.name ? item.name : "",
+            item.name ? item.name.split(' ')[0] : "",
             item.description ? item.description : "",
             item.source ? item.source : ""
         ]
