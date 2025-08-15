@@ -1,6 +1,7 @@
 // Popup script simplificado
 document.addEventListener('DOMContentLoaded', function() {
   const openButton = document.getElementById('openWhatsApp');
+  const contractButton = document.getElementById('contractDispatcher');
   
   // Botão para abrir WhatsApp
   openButton.addEventListener('click', function() {
@@ -15,5 +16,11 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       window.close();
     });
+  });
+  
+  // Botão para contratar disparador
+  contractButton.addEventListener('click', function() {
+    chrome.tabs.create({url: 'https://agentesintegrados.com.br'});
+    window.close();
   });
 });

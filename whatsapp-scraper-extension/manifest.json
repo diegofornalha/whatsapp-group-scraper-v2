@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "WhatsApp Group Scraper",
+  "name": "WhatsApp 20x",
   "version": "1.0.0",
-  "description": "Extrai membros de grupos do WhatsApp Web",
+  "description": "Multiplique seus resultados no WhatsApp",
   "permissions": [
     "storage"
   ],
@@ -10,7 +10,7 @@
     "https://web.whatsapp.com/*"
   ],
   "action": {
-    "default_title": "WhatsApp Scraper - Clique para abrir WhatsApp Web",
+    "default_title": "WhatsApp 20x - Clique para abrir WhatsApp Web",
     "default_popup": "popup.html"
   },
   "content_scripts": [

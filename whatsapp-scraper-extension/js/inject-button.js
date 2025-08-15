@@ -1,10 +1,11 @@
 // Script simplificado - Apenas injeta botão para carregar o scraper
-console.log('⚡ WhatsApp Scraper: Injetando botão...');
+console.log('⚡ WhatsApp 20x: Injetando botão...');
 
 // Variáveis globais para o scraper
 let memberListStore;
 let logsTracker;
 let modalObserver;
+let uiWidget; // Variável global para o widget
 const counterId = 'scraper-number-tracker';
 const exportName = 'whatsAppExport';
 
@@ -31,18 +32,31 @@ function waitForWhatsApp() {
 function injectButton() {
   // Verifica se já foi carregado
   if (document.getElementById('whatsapp-scraper-widget')) {
-    console.log('⚠️ WhatsApp Scraper já está carregado');
+    console.log('⚠️ WhatsApp 20x já está carregado');
+    // Se já existe mas está oculto, mostra
+    if (uiWidget) {
+      uiWidget.show();
+    }
     return;
   }
   
-  console.log('⚡ WhatsApp Scraper: Carregando automaticamente...');
+  console.log('⚡ WhatsApp 20x: Carregando automaticamente...');
   
   // Carrega o scraper diretamente, sem mostrar o modal
   setTimeout(() => {
     initializeScraper();
-    console.log('✅ WhatsApp Scraper: Carregado automaticamente!');
+    console.log('✅ WhatsApp 20x: Carregado automaticamente!');
   }, 500);
 }
+
+// Função para reabrir o modal (pode ser chamada externamente)
+window.reopenWhatsAppScraper = function() {
+  if (uiWidget && document.getElementById('whatsapp-scraper-widget')) {
+    uiWidget.show();
+  } else {
+    initializeScraper();
+  }
+};
 
 // Funções utilitárias
 function exportToCsv(data, filename) {
@@ -82,12 +96,76 @@ class UIContainer {
   constructor(title) {
     this.container = document.createElement('div');
     this.container.className = 'whatsapp-scraper-widget';
-    this.container.innerHTML = '<h3>' + title + '</h3>';
+    this.container.id = 'whatsapp-scraper-widget';
+    
+    // Criar estrutura com botão de fechar
+    const header = document.createElement('div');
+    header.style.position = 'relative';
+    header.style.paddingRight = '30px';
+    
+    const titleElement = document.createElement('h3');
+    titleElement.textContent = title;
+    header.appendChild(titleElement);
+    
+    // Botão de fechar
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'scraper-close-button';
+    closeButton.textContent = '✖'; // Usando X mais visível
+    closeButton.title = 'Fechar WhatsApp 20x';
+    closeButton.setAttribute('aria-label', 'Fechar modal');
+    
+    // Adicionar múltiplos event listeners para garantir funcionamento
+    closeButton.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.hide();
+    }, true);
+    
+    // Backup com mousedown para garantir resposta
+    closeButton.addEventListener('mousedown', (e) => {
+      if (e.button === 0) { // Apenas botão esquerdo do mouse
+        e.preventDefault();
+      }
+    });
+    
+    // Adicionar header primeiro, depois o botão de fechar por cima
+    this.container.appendChild(header);
+    this.container.appendChild(closeButton);
     document.body.appendChild(this.container);
+    
+    // Criar botão de reabrir
+    this.createReopenButton();
   }
   
   appendChild(element) {
     this.container.appendChild(element);
+  }
+  
+  hide() {
+    this.container.classList.add('hidden');
+    const reopenBtn = document.getElementById('scraper-reopen-button');
+    if (reopenBtn) {
+      reopenBtn.classList.remove('hidden');
+    }
+  }
+  
+  show() {
+    this.container.classList.remove('hidden');
+    const reopenBtn = document.getElementById('scraper-reopen-button');
+    if (reopenBtn) {
+      reopenBtn.classList.add('hidden');
+    }
+  }
+  
+  createReopenButton() {
+    const reopenButton = document.createElement('button');
+    reopenButton.id = 'scraper-reopen-button';
+    reopenButton.className = 'scraper-reopen-button hidden';
+    reopenButton.innerHTML = 'W';
+    reopenButton.title = 'Abrir WhatsApp 20x';
+    reopenButton.onclick = () => this.show();
+    document.body.appendChild(reopenButton);
   }
 }
 
@@ -269,7 +347,7 @@ function loadScraper() {
   button.textContent = 'Carregando...';
   button.disabled = true;
   
-  console.log('🚀 WhatsApp Scraper: Carregando...');
+  console.log('🚀 WhatsApp 20x: Carregando...');
   
   // Inicializa o scraper diretamente
   setTimeout(() => {
@@ -286,13 +364,19 @@ function loadScraper() {
 
 // Inicializa o scraper
 function initializeScraper() {
-  console.log('🚀 WhatsApp Scraper: Inicializando...');
+  console.log('🚀 WhatsApp 20x: Inicializando...');
+  
+  // Se já existe o widget, apenas mostra
+  if (uiWidget && document.getElementById('whatsapp-scraper-widget')) {
+    uiWidget.show();
+    return;
+  }
   
   // Inicializar o storage
   memberListStore = new WhatsAppStorage();
   
   // Criar UI
-  const uiWidget = new UIContainer('WhatsApp Scraper');
+  uiWidget = new UIContainer('WhatsApp 20x');
   
   // History Tracker
   logsTracker = new HistoryTracker();
@@ -391,7 +475,7 @@ function initializeScraper() {
   btnDisparador.style.color = 'white';
   btnDisparador.onclick = function() {
     // Abrir o disparador em nova aba
-    window.open('https://web.whatsapp.com/', '_blank');
+    window.open('https://agentesintegrados.com.br', '_blank');
     console.log('Redirecionando para o disparador...');
   };
   
@@ -407,7 +491,7 @@ function initializeScraper() {
   // Start monitoring
   startMonitoring();
   
-  console.log('✅ WhatsApp Scraper: Interface criada com sucesso!');
+  console.log('✅ WhatsApp 20x: Interface criada com sucesso!');
   console.log('📌 Abra um grupo e clique no nome para ver os membros');
 }
 
