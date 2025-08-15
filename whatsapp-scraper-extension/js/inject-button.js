@@ -8,6 +8,14 @@ let modalObserver;
 const counterId = 'scraper-number-tracker';
 const exportName = 'whatsAppExport';
 
+// Lista de nomes a serem excluídos na exportação
+const EXCLUDED_NAMES = ['Você', 'Ramon Socio', 'You', 'Luciana Siguemoto Agentes'];
+
+// Função helper para verificar se deve excluir o contato
+function shouldExclude(name) {
+  return !name || EXCLUDED_NAMES.includes(name);
+}
+
 // Aguarda o WhatsApp carregar
 function waitForWhatsApp() {
   const checkInterval = setInterval(() => {
@@ -21,31 +29,19 @@ function waitForWhatsApp() {
 
 // Injeta o botão simples
 function injectButton() {
-  // Verifica se já existe
-  if (document.getElementById('whatsapp-scraper-button')) {
+  // Verifica se já foi carregado
+  if (document.getElementById('whatsapp-scraper-widget')) {
+    console.log('⚠️ WhatsApp Scraper já está carregado');
     return;
   }
   
-  // Cria container do botão
-  const container = document.createElement('div');
-  container.id = 'whatsapp-scraper-container';
-  container.innerHTML = `
-    <div class="scraper-header">
-      <span class="scraper-icon">⚡</span>
-      <h3>Carregar Script</h3>
-    </div>
-    <p class="scraper-description">Clique no botão abaixo para carregar o script de scraping:</p>
-    <button id="whatsapp-scraper-button">
-      Carregar WhatsApp Scraper
-    </button>
-  `;
+  console.log('⚡ WhatsApp Scraper: Carregando automaticamente...');
   
-  document.body.appendChild(container);
-  
-  // Adiciona evento ao botão
-  document.getElementById('whatsapp-scraper-button').addEventListener('click', loadScraper);
-  
-  console.log('✅ WhatsApp Scraper: Botão injetado com sucesso!');
+  // Carrega o scraper diretamente, sem mostrar o modal
+  setTimeout(() => {
+    initializeScraper();
+    console.log('✅ WhatsApp Scraper: Carregado automaticamente!');
+  }, 500);
 }
 
 // Funções utilitárias
@@ -151,16 +147,65 @@ class WhatsAppStorage extends ListStorage {
   }
   
   itemToRow(item) {
+    // Ignorar contatos sem nome ou contatos próprios
+    if (shouldExclude(item.name)) {
+      return null; // Retornar null para indicar que deve ser ignorado
+    }
+    
+    // Também verificar se o phoneNumber contém um nome excluído (quando não há telefone real)
+    if (!item.name && item.phoneNumber) {
+      // Se não tem nome mas o phoneNumber não parece ser um telefone (não começa com + ou número)
+      if (!/^[+\d]/.test(item.phoneNumber)) {
+        // É um nome no campo phoneNumber, verificar se deve excluir
+        if (shouldExclude(item.phoneNumber)) {
+          return null;
+        }
+      } else {
+        // É um número sem nome, filtrar
+        return null;
+      }
+    }
+    
     return [
       item.phoneNumber || "",
-      item.name || ""
+      item.name ? item.name.split(' ')[0] : ""
     ];
   }
   
   toCsvData() {
     const rows = [this.headers];
     this.data.forEach(item => {
-      rows.push(this.itemToRow(item));
+      const row = this.itemToRow(item);
+      if (row) { // Apenas adicionar se não for null
+        rows.push(row);
+      }
+    });
+    return rows;
+  }
+  
+  // Novo método para exportar todos os contatos sem filtro
+  toCsvDataRaw() {
+    const rows = [this.headers];
+    this.data.forEach(item => {
+      rows.push([
+        item.phoneNumber || "",
+        item.name || "" // Nome completo sem tratamento
+      ]);
+    });
+    return rows;
+  }
+  
+  // Novo método para exportar apenas contatos sem nome (números apenas)
+  toCsvDataNoName() {
+    const rows = [["Phone Number"]]; // Apenas coluna de telefone
+    this.data.forEach(item => {
+      // Incluir apenas se não tem nome ou se o nome está na lista de exclusão
+      if (!item.name || item.name.trim() === '') {
+        // Verificar se phoneNumber é realmente um número (começa com + ou dígito)
+        if (item.phoneNumber && /^[+\d]/.test(item.phoneNumber)) {
+          rows.push([item.phoneNumber]);
+        }
+      }
     });
     return rows;
   }
@@ -181,13 +226,41 @@ class WhatsAppStorage extends ListStorage {
 
 async function updateCounter() {
   const tracker = document.getElementById(counterId);
+  const trackerFiltered = document.getElementById(counterId + '-filtered');
+  const trackerNoName = document.getElementById(counterId + '-noname');
+  
   if(tracker){
     const countValue = memberListStore.getCount();
     tracker.textContent = countValue.toString();
   }
+  
+  if(trackerFiltered){
+    // Contar apenas os contatos que passariam pelo filtro
+    let filteredCount = 0;
+    memberListStore.data.forEach(item => {
+      const row = memberListStore.itemToRow(item);
+      if (row) filteredCount++;
+    });
+    trackerFiltered.textContent = filteredCount.toString();
+  }
+  
+  if(trackerNoName){
+    // Contar apenas contatos sem nome
+    let noNameCount = 0;
+    memberListStore.data.forEach(item => {
+      if (!item.name || item.name.trim() === '') {
+        if (item.phoneNumber && /^[+\d]/.test(item.phoneNumber)) {
+          noNameCount++;
+        }
+      }
+    });
+    trackerNoName.textContent = noNameCount.toString();
+  }
 }
 
 // Carrega o scraper quando o botão é clicado
+// NOTA: Esta função não é mais usada pois o scraper carrega automaticamente
+// Mantida para compatibilidade/referência
 function loadScraper() {
   const button = document.getElementById('whatsapp-scraper-button');
   const container = document.getElementById('whatsapp-scraper-container');
@@ -224,28 +297,81 @@ function initializeScraper() {
   // History Tracker
   logsTracker = new HistoryTracker();
   
-  // Button Download
-  const btnDownload = createCta('Download 0 users');
-  btnDownload.onclick = async function() {
+  // Button Download Tratado (Filtrado)
+  const btnDownloadFiltered = createCta('Download Filtrado');
+  btnDownloadFiltered.onclick = async function() {
     const timestamp = new Date().toISOString();
     const data = memberListStore.toCsvData();
     try{
-      exportToCsv(data, exportName + '-' + timestamp + '.csv');
+      exportToCsv(data, exportName + '-filtrado-' + timestamp + '.csv');
+      console.log('✅ CSV filtrado exportado com sucesso');
     }catch(err){
-      console.error('Error while generating export');
+      console.error('Error while generating filtered export');
       console.log(err.stack);
     }
   };
   
-  // Criar span para o contador dentro do botão
-  btnDownload.innerHTML = '';
-  btnDownload.appendChild(createTextSpan('Download '));
+  // Criar span para o contador dentro do botão filtrado
+  btnDownloadFiltered.innerHTML = '';
+  btnDownloadFiltered.appendChild(createTextSpan('📋 Filtrado ('));
+  const counterSpanFiltered = createTextSpan('0');
+  counterSpanFiltered.id = counterId + '-filtered';
+  btnDownloadFiltered.appendChild(counterSpanFiltered);
+  btnDownloadFiltered.appendChild(createTextSpan(')')); 
+  btnDownloadFiltered.style.backgroundColor = '#25D366';
+  btnDownloadFiltered.style.marginBottom = '5px';
+  
+  // Button Download Completo (Sem Tratamento)
+  const btnDownloadRaw = createCta('Download Completo');
+  btnDownloadRaw.onclick = async function() {
+    const timestamp = new Date().toISOString();
+    const data = memberListStore.toCsvDataRaw();
+    try{
+      exportToCsv(data, exportName + '-completo-' + timestamp + '.csv');
+      console.log('✅ CSV completo exportado com sucesso');
+    }catch(err){
+      console.error('Error while generating raw export');
+      console.log(err.stack);
+    }
+  };
+  
+  // Criar span para o contador dentro do botão completo
+  btnDownloadRaw.innerHTML = '';
+  btnDownloadRaw.appendChild(createTextSpan('📄 Completo ('));
   const counterSpan = createTextSpan('0');
   counterSpan.id = counterId;
-  btnDownload.appendChild(counterSpan);
-  btnDownload.appendChild(createTextSpan(' users'));
+  btnDownloadRaw.appendChild(counterSpan);
+  btnDownloadRaw.appendChild(createTextSpan(')'));
+  btnDownloadRaw.style.backgroundColor = '#128C7E';
+  btnDownloadRaw.style.marginBottom = '5px';
   
-  uiWidget.appendChild(btnDownload);
+  // Button Download Sem Nome (Apenas Números)
+  const btnDownloadNoName = createCta('Download Sem Nome');
+  btnDownloadNoName.onclick = async function() {
+    const timestamp = new Date().toISOString();
+    const data = memberListStore.toCsvDataNoName();
+    try{
+      exportToCsv(data, exportName + '-sem-nome-' + timestamp + '.csv');
+      console.log('✅ CSV sem nome exportado com sucesso');
+    }catch(err){
+      console.error('Error while generating no-name export');
+      console.log(err.stack);
+    }
+  };
+  
+  // Criar span para o contador dentro do botão sem nome
+  btnDownloadNoName.innerHTML = '';
+  btnDownloadNoName.appendChild(createTextSpan('📱 Sem Nome ('));
+  const counterSpanNoName = createTextSpan('0');
+  counterSpanNoName.id = counterId + '-noname';
+  btnDownloadNoName.appendChild(counterSpanNoName);
+  btnDownloadNoName.appendChild(createTextSpan(')'));
+  btnDownloadNoName.style.backgroundColor = '#E67E22';
+  btnDownloadNoName.style.marginBottom = '10px';
+  
+  uiWidget.appendChild(btnDownloadFiltered);
+  uiWidget.appendChild(btnDownloadRaw);
+  uiWidget.appendChild(btnDownloadNoName);
   uiWidget.appendChild(createSpacer());
   
   // Button Reset
@@ -257,6 +383,19 @@ function initializeScraper() {
   };
   
   uiWidget.appendChild(btnReinit);
+  
+  // Button Ir para Disparador
+  const btnDisparador = createCta('Ir para Disparador');
+  btnDisparador.style.marginTop = '10px';
+  btnDisparador.style.backgroundColor = '#0066cc';
+  btnDisparador.style.color = 'white';
+  btnDisparador.onclick = function() {
+    // Abrir o disparador em nova aba
+    window.open('https://web.whatsapp.com/', '_blank');
+    console.log('Redirecionando para o disparador...');
+  };
+  
+  uiWidget.appendChild(btnDisparador);
   uiWidget.appendChild(createSpacer());
   
   // Status text
@@ -331,6 +470,12 @@ function listenModalChanges() {
           }
           
           if(profileName){
+            // Ignorar contatos próprios e sem nome válido
+            if (shouldExclude(profileName)) {
+              console.log('Ignorando contato próprio ou inválido:', profileName);
+              return;
+            }
+            
             const identifier = profilePhone ? profilePhone : profileName;
             console.log('Encontrado:', identifier);
             
