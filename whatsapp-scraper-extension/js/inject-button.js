@@ -498,34 +498,67 @@ function initializeScraper() {
 function listenModalChanges() {
   const modalElems = document.querySelectorAll('[data-animate-modal-body="true"]');
   if(modalElems.length === 0) return;
-  
+
   const modalElem = modalElems[0];
-  const targetNode = modalElem.querySelectorAll("div[style*='height']")[1];
-  
-  if(!targetNode) return;
-  
+
+  // CORRIGIDO: Encontrar o container de scroll correto
+  // O WhatsApp agora coloca listitems como divs com height inline,
+  // então o container é o div pai que contém TODOS os listitems
+  let targetNode = null;
+
+  // Estratégia 1: Encontrar o pai do primeiro listitem dentro do modal
+  const firstListitem = modalElem.querySelector('[role="listitem"]');
+  if (firstListitem) {
+    targetNode = firstListitem.parentElement;
+    console.log('[WhatsApp 20x] Container encontrado via pai de listitem, filhos:', targetNode.children.length);
+  }
+
+  // Estratégia 2 (fallback): div com height grande (container virtual scroll)
+  if (!targetNode) {
+    const heightDivs = modalElem.querySelectorAll("div[style*='height']");
+    for (let i = 0; i < heightDivs.length; i++) {
+      const div = heightDivs[i];
+      // Container real tem muitos filhos e não é um listitem
+      if (div.children.length > 5 && div.getAttribute('role') !== 'listitem') {
+        targetNode = div;
+        console.log('[WhatsApp 20x] Container encontrado via height div[' + i + '], filhos:', div.children.length);
+        break;
+      }
+    }
+  }
+
+  if(!targetNode) {
+    console.warn('[WhatsApp 20x] Container de scroll não encontrado!');
+    return;
+  }
+
   const config = { attributes: true, childList: true, subtree: true };
-  
+
   const callback = (mutationList) => {
     for (const mutation of mutationList) {
       if (mutation.type === "attributes") {
         const target = mutation.target;
-        const tagName = target.tagName;
-        
+
         if(
-          tagName.toLowerCase() !== 'div' ||
+          target.tagName.toLowerCase() !== 'div' ||
           target.getAttribute("role") !== "listitem"
         ){
           continue;
         }
-        
+
         const listItem = target;
-        
+
         setTimeout(async () => {
           let profileName = "";
           let profilePhone = "";
-          
-          // Name
+
+          // CORRIGIDO: Nova estrutura de spans do WhatsApp (abril 2026)
+          // Cada campo tem 2 spans: um de exibição (sem title) e um acessível (com title)
+          // Nome: span[title]:not(.copyable-text) com classe _ao3e
+          // Status: span[title].copyable-text com classe _ao3e
+          // Telefone: extraído do nome quando é um número, ou de spans com padrão de telefone
+
+          // Extrair nome/identificador principal
           const titleElems = listItem.querySelectorAll("span[title]:not(.copyable-text)");
           if(titleElems.length > 0){
             const text = titleElems[0].textContent;
@@ -536,35 +569,63 @@ function listenModalChanges() {
               }
             }
           }
-          
+
           if(profileName.length === 0){
             return;
           }
-          
-          // Phone
-          const phoneElems = listItem.querySelectorAll("span[style*='height']:not([title])");
-          if(phoneElems.length > 0){
-            const text = phoneElems[0].textContent;
-            if(text){
-              const textClean = text.trim();
-              if(textClean && textClean.length > 0){
-                profilePhone = textClean;
+
+          // CORRIGIDO: Extrair telefone com múltiplas estratégias
+          // Estratégia 1: Se o nome parece um telefone (+55...), ele É o telefone
+          const phoneRegex = /^\+?\d[\d\s\-()]{7,}$/;
+          if (phoneRegex.test(profileName.trim())) {
+            profilePhone = profileName.trim();
+            // Tentar encontrar nome real em outro lugar (span de exibição com fontSize maior)
+            const displaySpans = listItem.querySelectorAll('span[style*="--x-fontSize"]');
+            for (const ds of displaySpans) {
+              const txt = (ds.textContent || '').trim();
+              if (txt && txt !== profilePhone && !phoneRegex.test(txt) && txt !== 'default-contact-refreshed') {
+                profileName = cleanName(txt);
+                break;
               }
             }
           }
-          
+
+          // Estratégia 2: Procurar telefone em spans com padrão numérico
+          if (!profilePhone) {
+            const allSpans = listItem.querySelectorAll('span');
+            for (const span of allSpans) {
+              const txt = (span.textContent || '').trim();
+              if (phoneRegex.test(txt) && txt !== profileName) {
+                profilePhone = txt;
+                break;
+              }
+            }
+          }
+
+          // Estratégia 3 (legado): span com height inline sem title
+          if (!profilePhone) {
+            const phoneElems = listItem.querySelectorAll("span[style*='height']:not([title])");
+            if(phoneElems.length > 0){
+              const text = phoneElems[0].textContent;
+              if(text){
+                const textClean = text.trim();
+                if(textClean && textClean.length > 0){
+                  profilePhone = textClean;
+                }
+              }
+            }
+          }
+
           if(profileName){
-            // Ignorar contatos próprios e sem nome válido
             if (shouldExclude(profileName)) {
-              console.log('Ignorando contato próprio ou inválido:', profileName);
               return;
             }
-            
+
             const identifier = profilePhone ? profilePhone : profileName;
-            console.log('Encontrado:', identifier);
-            
+            console.log('Encontrado:', profileName, profilePhone ? '(' + profilePhone + ')' : '');
+
             const data = {};
-            
+
             if(profilePhone){
               data.phoneNumber = profilePhone;
               if(profileName){
@@ -575,7 +636,7 @@ function listenModalChanges() {
                 data.phoneNumber = profileName;
               }
             }
-            
+
             memberListStore.addElem(
               identifier, {
                 profileId: identifier,
@@ -583,7 +644,7 @@ function listenModalChanges() {
               },
               true
             );
-            
+
             updateCounter();
             updateStatus('Coletando: ' + profileName);
           }
@@ -591,7 +652,7 @@ function listenModalChanges() {
       }
     }
   };
-  
+
   modalObserver = new MutationObserver(callback);
   modalObserver.observe(targetNode, config);
   updateStatus('Modal detectado - Role a lista para coletar dados');
@@ -620,8 +681,11 @@ function startMonitoring() {
         if(mutation.addedNodes.length > 0){
           mutation.addedNodes.forEach((node) => {
             if(node.nodeType === Node.ELEMENT_NODE) {
-              const modalElems = node.querySelectorAll('[data-animate-modal-body="true"]');
-              if(modalElems.length > 0){
+              // Detectar modal de membros (ambos seletores)
+              const hasModal = node.querySelectorAll('[data-animate-modal-body="true"]').length > 0;
+              const hasDialog = node.querySelectorAll('[role="dialog"]').length > 0 &&
+                               node.querySelectorAll('[role="listitem"]').length > 0;
+              if(hasModal || hasDialog){
                 setTimeout(() => {
                   listenModalChanges();
                 }, 10);
@@ -629,12 +693,13 @@ function startMonitoring() {
             }
           });
         }
-        
+
         if(mutation.removedNodes.length > 0){
           mutation.removedNodes.forEach((node) => {
             if(node.nodeType === Node.ELEMENT_NODE) {
-              const modalElems = node.querySelectorAll('[data-animate-modal-body="true"]');
-              if(modalElems.length > 0){
+              const hasModal = node.querySelectorAll('[data-animate-modal-body="true"]').length > 0;
+              const hasDialog = node.querySelectorAll('[role="dialog"]').length > 0;
+              if(hasModal || hasDialog){
                 stopListeningModalChanges();
               }
             }
