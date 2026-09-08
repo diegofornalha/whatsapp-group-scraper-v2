@@ -1,47 +1,58 @@
-# Instruções - WhatsApp Scraper Simplificado
+# Instruções rápidas — WhatsApp 20x
 
-## Instalação Rápida
+## 1. Instalar / atualizar
 
-1. **Recarregue a extensão** em chrome://extensions/
-2. **Acesse** https://web.whatsapp.com
-3. **Faça login** com QR code
+1. Abra `chrome://extensions/`
+2. Clique em **Atualizar** no card do WhatsApp 20x (ou **Carregar sem
+   compactação** e escolha a pasta `whatsapp-scraper-extension`)
+3. Abra <https://web.whatsapp.com> e **recarregue a página (F5)**
 
-## O que você verá:
+O passo 3 é obrigatório: content script só entra em páginas carregadas depois
+da atualização da extensão.
 
-### 1. Botão Central
-Após o WhatsApp carregar, aparecerá um botão no centro da tela:
+## 2. Coletar
 
-```
-⚡ Carregar Script
+1. Abra um grupo
+2. Toque no **nome do grupo** no topo → abre os dados do grupo
+3. Abra a lista de participantes (**Ver todos**, se o grupo for grande)
+4. Clique em **▶ Coletar tudo** no painel
 
-Clique no botão abaixo para carregar o script de scraping:
+A extensão rola a lista inteira sozinha e o contador sobe até o total do grupo.
+O botão vira **⏹ Parar coleta** — clique de novo para interromper.
 
-[Carregar WhatsApp Scraper]
-```
+Por que não basta rolar na mão: a lista do WhatsApp é virtualizada. Só ~20 a 30
+linhas existem na página por vez, e as que saem da tela são apagadas. Rolar até
+o fim e só então coletar pegaria apenas os últimos 20.
 
-### 2. Após Clicar no Botão
-- O botão desaparece
-- A interface do scraper aparece no canto superior direito
-- Mostra: "Download 0 users | Reset"
+## 3. Exportar
 
-### 3. Como Coletar Dados
-1. Abra um grupo do WhatsApp
-2. Clique no nome do grupo (no topo)
-3. Role a lista de membros
-4. Os dados são coletados automaticamente
-5. Clique em "Download" para baixar CSV
+| Botão | Quando usar |
+|---|---|
+| 📋 Filtrado | Lista limpa, só primeiro nome |
+| 📄 Completo | Tudo, sem tratamento |
+| 📱 Sem Nome | Só os números sem nome salvo |
 
-## Diferenças da Versão Anterior
+## Solução de problemas
 
-| Antes | Agora |
-|-------|-------|
-| Carregava automaticamente | Você clica para carregar |
-| Interface sempre visível | Interface aparece após clicar |
-| Mais complexo | Mais simples |
+**O painel não aparece**
+Recarregue a página (F5). Se continuar, confira no console (F12) se aparece
+`[WhatsApp 20x] Inicializando...`.
 
-## Solução de Problemas
+**O contador fica em zero**
+Confirme que a lista aberta é a de *participantes do grupo*, não a lista de
+conversas da barra lateral — a extensão ignora a barra lateral de propósito.
 
-Se o botão não aparecer:
-1. Recarregue a página (F5)
-2. Verifique o console (F12) para erros
-3. Recarregue a extensão em chrome://extensions/
+**"Abra a lista de participantes do grupo primeiro"**
+O painel não achou uma lista rolável na tela. Abra os dados do grupo e a lista
+de participantes antes de clicar em Coletar tudo.
+
+**A coleta para antes do total do grupo**
+Clique em Coletar tudo de novo: ela acumula em cima do que já tem, não recomeça
+do zero.
+
+**Perdi os dados ao recarregar**
+Não deveria acontecer: a coleta é salva automaticamente e restaurada. Se
+acontecer, verifique se a permissão `storage` está ativa no card da extensão.
+
+**Quero recomeçar do zero**
+Botão **Reset** (pede confirmação antes de apagar).

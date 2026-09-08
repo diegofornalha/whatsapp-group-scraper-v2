@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WhatsApp 20x",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Multiplique seus resultados no WhatsApp",
   "permissions": [
     "storage"
@@ -9,6 +9,9 @@
   "host_permissions": [
     "https://web.whatsapp.com/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; base-uri 'self'; form-action 'none'"
+  },
   "action": {
     "default_title": "WhatsApp 20x - Clique para abrir WhatsApp Web",
     "default_popup": "popup.html"

@@ -1,56 +1,1070 @@
-// Script simplificado - Apenas injeta botão para carregar o scraper
-console.log('⚡ WhatsApp 20x: Injetando botão...');
+/**
+ * @module WhatsApp20x/ContentScript
+ * @description Coleta membros visíveis do modal de participantes do WhatsApp Web
+ *              e permite exportar em CSV. Toda a coleta é local ao navegador.
+ * @security Nenhum dado sai do navegador. CSV é escapado contra injeção de fórmula.
+ *           Nenhuma escrita via innerHTML com conteúdo vindo da página.
+ * @privacy Dados ficam em chrome.storage.local e podem ser apagados no botão "Reset".
+ * @performance Sem polling. Varredura debounced (>=150ms) só sobre os itens visíveis
+ *              do modal (dezenas), não sobre o dataset inteiro.
+ * @legal O uso deve respeitar os Termos de Serviço do WhatsApp e a LGPD/GDPR.
+ *        A coleta só ocorre em grupos que o próprio usuário já pode visualizar.
+ */
 
-// Variáveis globais para o scraper
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Configuração
+// ---------------------------------------------------------------------------
+
+const COUNTER_ID = 'scraper-number-tracker';
+const EXPORT_NAME = 'whatsAppExport';
+
+const STORAGE_KEY_CONTACTS = 'wa20x_contacts';
+const STORAGE_KEY_EXCLUDED = 'wa20x_excluded';
+
+/** Intervalos de debounce (ms). CLAUDE.md exige mínimo de 50ms. */
+const SWEEP_DEBOUNCE_MS = 150;
+const COUNTER_DEBOUNCE_MS = 200;
+const PERSIST_DEBOUNCE_MS = 1000;
+
+/** Nomes ignorados na coleta. Sobrescritível em chrome.storage.local. */
+const DEFAULT_EXCLUDED_NAMES = [
+  'Você',
+  'You',
+  'Ramon Socio',
+  'Luciana Siguemoto Agentes'
+];
+
+/** Um identificador é telefone se casar com isto. */
+const PHONE_REGEX = /^\+?\d[\d\s\-()]{7,}$/;
+
+/** Textos internos do WhatsApp que nunca são nomes de contato. */
+const NOT_A_NAME = new Set(['default-contact-refreshed', '']);
+
+/** Passo de rolagem automática, como fração da altura visível do scroller. */
+const AUTOSCROLL_STEP_RATIO = 0.6;
+/** Espera de render após cada rolagem (ms), além de dois requestAnimationFrame. */
+const AUTOSCROLL_SETTLE_MS = 300;
+/** Rodadas sem contato novo exigidas para considerar a lista esgotada. */
+const AUTOSCROLL_IDLE_ROUNDS = 3;
+/** Trava de segurança: máximo de rodadas de rolagem por execução. */
+const AUTOSCROLL_MAX_ROUNDS = 2000;
+
+let excludedNames = new Set(DEFAULT_EXCLUDED_NAMES);
+
+// ---------------------------------------------------------------------------
+// Estado
+// ---------------------------------------------------------------------------
+
 let memberListStore;
-let logsTracker;
-let modalObserver;
-let uiWidget; // Variável global para o widget
-const counterId = 'scraper-number-tracker';
-const exportName = 'whatsAppExport';
+let uiWidget;
 
-// Lista de nomes a serem excluídos na exportação
-const EXCLUDED_NAMES = ['Você', 'Ramon Socio', 'You', 'Luciana Siguemoto Agentes'];
+/** Observer do modal de participantes atualmente anexado. */
+let modalObserver = null;
+/** Raiz da varredura: contém todos os [role="listitem"] renderizados. */
+let attachedContainer = null;
+/**
+ * Elemento que de fato rola. Pode ser vários níveis acima do listitem: o pai
+ * direto é um spacer de altura total com overflow hidden, onde scrollTop é
+ * ignorado. Rolar o elemento errado é o que fazia a coleta parar na 1ª rodada.
+ */
+let attachedScroller = null;
+/** Listener de scroll registrado no scroller anexado. */
+let attachedScrollHandler = null;
+/** Execução de rolagem automática em andamento. */
+let autoScrollActive = false;
 
-// Função helper para verificar se deve excluir o contato
-function shouldExclude(name) {
-  return !name || EXCLUDED_NAMES.includes(name);
+/** Observer da árvore da aplicação (detecta abertura/fechamento do modal). */
+let appObserver = null;
+
+// ---------------------------------------------------------------------------
+// Utilitários
+// ---------------------------------------------------------------------------
+
+/**
+ * Agenda `fn` para rodar no máximo uma vez a cada `wait` ms.
+ * @returns {Function} versão debounced, com método `.cancel()`
+ */
+function debounce(fn, wait) {
+  let timer = null;
+  const wrapped = function (...args) {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn.apply(this, args);
+    }, wait);
+  };
+  wrapped.cancel = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+  return wrapped;
 }
 
-// Aguarda o WhatsApp carregar
-function waitForWhatsApp() {
-  const checkInterval = setInterval(() => {
-    const app = document.getElementById('app');
-    if (app) {
-      clearInterval(checkInterval);
-      injectButton();
+/**
+ * Trata um erro seguindo o padrão obrigatório do CLAUDE.md:
+ * log detalhado, aviso amigável ao usuário e retorno de um fallback seguro.
+ */
+function handleError(context, error, userMessage, fallback) {
+  console.error(`[WhatsApp 20x][${context}]: ${error && error.message}`, error);
+  notifyUser(userMessage);
+  return fallback;
+}
+
+/** Mostra uma mensagem transitória na área de status do widget. */
+function notifyUser(message) {
+  const statusText = document.getElementById('scraper-status');
+  if (!statusText) return;
+  const previous = statusText.textContent;
+  statusText.textContent = message;
+  statusText.dataset.transient = 'true';
+  setTimeout(() => {
+    if (statusText.dataset.transient === 'true') {
+      statusText.dataset.transient = 'false';
+      statusText.textContent = previous;
     }
+  }, 4000);
+}
+
+function updateStatus(message) {
+  const statusText = document.getElementById('scraper-status');
+  if (!statusText) return;
+  // Não sobrescreve uma notificação de erro que ainda está visível.
+  if (statusText.dataset.transient === 'true') return;
+  statusText.textContent = message;
+}
+
+function cleanName(name) {
+  // Remove o "~" que o WhatsApp prefixa em nomes de push (com ou sem espaço).
+  return String(name || '').trim().replace(/^~\s*/, '');
+}
+
+function shouldExclude(name) {
+  return !name || excludedNames.has(name);
+}
+
+/**
+ * Chave canônica de um contato.
+ * O mesmo participante aparece com formatações diferentes conforme o span
+ * ("+55 11 91234-5678" vs "+5511912345678"), então normalizamos para dígitos.
+ */
+function contactKey(phone, name) {
+  if (phone) {
+    const digits = phone.replace(/\D/g, '');
+    if (digits) return `tel:${digits}`;
+  }
+  return name ? `nome:${name}` : '';
+}
+
+/**
+ * A lista tem [role="listitem"] que não são participantes: cabeçalhos de seção
+ * alfabéticos ("P") e separadores cujo texto é só "~". Um nome de uma letra só,
+ * sem telefone algum, nunca é contato.
+ */
+function isLikelyMemberRow(name, phone) {
+  if (phone) return true;
+  if (!name) return false;
+  const alphanumeric = name.replace(/[^\p{L}\p{N}]/gu, '');
+  return alphanumeric.length >= 2;
+}
+
+// ---------------------------------------------------------------------------
+// Exportação CSV
+// ---------------------------------------------------------------------------
+
+/**
+ * Escapa um valor para CSV (RFC 4180) e neutraliza injeção de fórmula.
+ * @security Um nome iniciado por = + - @ TAB ou CR é executado como fórmula por
+ *           Excel/Sheets/LibreOffice. Prefixamos com apóstrofo para desarmar.
+ */
+function escapeCsvValue(value) {
+  let text = value === null || value === undefined ? '' : String(value);
+
+  if (/^[=+\-@\t\r]/.test(text)) {
+    text = `'${text}`;
+  }
+
+  if (/["\n\r,;]/.test(text)) {
+    text = `"${text.replace(/"/g, '""')}"`;
+  }
+
+  return text;
+}
+
+/**
+ * Gera e baixa um CSV.
+ * @param {Array<Array<string>>} rows matriz de linhas já ordenada (inclui header)
+ * @param {string} filename nome do arquivo
+ */
+function exportToCsv(rows, filename) {
+  const csv = rows.map(row => row.map(escapeCsvValue).join(',')).join('\r\n');
+
+  // BOM UTF-8: sem ele o Excel no Windows quebra acentuação.
+  const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+
+  // Revogar de imediato pode cancelar o download em alguns builds do Chrome.
+  setTimeout(() => {
+    anchor.remove();
+    URL.revokeObjectURL(url);
   }, 1000);
 }
 
-// Injeta o botão simples
-function injectButton() {
-  // Verifica se já foi carregado
-  if (document.getElementById('whatsapp-scraper-widget')) {
-    console.log('⚠️ WhatsApp 20x já está carregado');
-    // Se já existe mas está oculto, mostra
-    if (uiWidget) {
-      uiWidget.show();
+/** Timestamp seguro para nome de arquivo (sem ":" nem "."). */
+function fileTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+// ---------------------------------------------------------------------------
+// Armazenamento
+// ---------------------------------------------------------------------------
+
+/**
+ * Store de contatos indexado por identificador.
+ * Usa Map para lookup O(1) — a versão anterior fazia find() linear por mutação,
+ * o que tornava a coleta O(n²) em grupos grandes.
+ */
+class WhatsAppStorage {
+  constructor() {
+    /** @type {Map<string, {profileId: string, phoneNumber?: string, name?: string}>} */
+    this.items = new Map();
+  }
+
+  get headers() {
+    return ['Phone Number', 'Name'];
+  }
+
+  get size() {
+    return this.items.size;
+  }
+
+  /**
+   * Insere ou atualiza um contato.
+   * @returns {boolean} true se algo mudou (novo registro ou campo preenchido)
+   */
+  upsert(id, data) {
+    const existing = this.items.get(id);
+
+    if (!existing) {
+      this.items.set(id, { profileId: id, ...data });
+      return true;
+    }
+
+    let changed = false;
+    for (const [key, value] of Object.entries(data)) {
+      // Só sobrescreve com valor não-vazio; evita apagar um nome já capturado
+      // quando o mesmo item volta ao DOM sem o nome renderizado.
+      if (value && existing[key] !== value) {
+        existing[key] = value;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  clear() {
+    this.items.clear();
+  }
+
+  values() {
+    return Array.from(this.items.values());
+  }
+
+  replaceAll(items) {
+    this.items.clear();
+    for (const item of items) {
+      if (!item) continue;
+      // Re-chaveia: dados salvos por versões antigas usavam o telefone cru.
+      const key = contactKey(item.phoneNumber, item.name) || item.profileId;
+      if (key) {
+        this.items.set(key, { ...item, profileId: key });
+      }
+    }
+  }
+
+  /** Um item entra na exportação filtrada? */
+  isFiltered(item) {
+    if (shouldExclude(item.name)) return false;
+
+    if (!item.name && item.phoneNumber) {
+      // Sem nome: só interessa se o campo for de fato um telefone.
+      if (!PHONE_REGEX.test(item.phoneNumber)) {
+        return !shouldExclude(item.phoneNumber);
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  /** Um item é "sem nome" (só número)? */
+  isNameless(item) {
+    if (item.name && item.name.trim() !== '') return false;
+    return Boolean(item.phoneNumber && /^[+\d]/.test(item.phoneNumber));
+  }
+
+  /** Contatos com nome, primeiro nome apenas. */
+  toCsvDataFiltered() {
+    const rows = [this.headers];
+    for (const item of this.items.values()) {
+      if (!this.isFiltered(item)) continue;
+      rows.push([
+        item.phoneNumber || '',
+        item.name ? item.name.split(' ')[0] : ''
+      ]);
+    }
+    return rows;
+  }
+
+  /** Tudo que foi coletado, sem tratamento. */
+  toCsvDataRaw() {
+    const rows = [this.headers];
+    for (const item of this.items.values()) {
+      rows.push([item.phoneNumber || '', item.name || '']);
+    }
+    return rows;
+  }
+
+  /** Apenas números sem nome associado. */
+  toCsvDataNoName() {
+    const rows = [['Phone Number']];
+    for (const item of this.items.values()) {
+      if (this.isNameless(item)) {
+        rows.push([item.phoneNumber]);
+      }
+    }
+    return rows;
+  }
+
+  /** Contagens para os três botões, em uma única passada. */
+  counts() {
+    let total = 0;
+    let filtered = 0;
+    let nameless = 0;
+
+    for (const item of this.items.values()) {
+      total++;
+      if (this.isFiltered(item)) filtered++;
+      if (this.isNameless(item)) nameless++;
+    }
+
+    return { total, filtered, nameless };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Persistência (chrome.storage.local)
+// ---------------------------------------------------------------------------
+
+function storageAvailable() {
+  return typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
+}
+
+async function loadSettings() {
+  if (!storageAvailable()) return;
+  try {
+    const stored = await chrome.storage.local.get(STORAGE_KEY_EXCLUDED);
+    const list = stored[STORAGE_KEY_EXCLUDED];
+    if (Array.isArray(list) && list.length > 0) {
+      excludedNames = new Set(list);
+    }
+  } catch (error) {
+    handleError('loadSettings', error, 'Não foi possível ler as configurações.', null);
+  }
+}
+
+async function loadContacts() {
+  if (!storageAvailable()) return;
+  try {
+    const stored = await chrome.storage.local.get(STORAGE_KEY_CONTACTS);
+    const items = stored[STORAGE_KEY_CONTACTS];
+    if (Array.isArray(items) && items.length > 0) {
+      memberListStore.replaceAll(items);
+      console.log(`[WhatsApp 20x] ${items.length} contato(s) restaurado(s) da sessão anterior.`);
+    }
+  } catch (error) {
+    handleError('loadContacts', error, 'Não foi possível restaurar a coleta anterior.', null);
+  }
+}
+
+const persistContacts = debounce(async () => {
+  if (!storageAvailable()) return;
+  try {
+    await chrome.storage.local.set({
+      [STORAGE_KEY_CONTACTS]: memberListStore.values()
+    });
+  } catch (error) {
+    handleError('persistContacts', error, 'Falha ao salvar. Exporte o CSV agora.', null);
+  }
+}, PERSIST_DEBOUNCE_MS);
+
+async function clearPersistedContacts() {
+  if (!storageAvailable()) return;
+  try {
+    await chrome.storage.local.remove(STORAGE_KEY_CONTACTS);
+  } catch (error) {
+    handleError('clearPersistedContacts', error, 'Falha ao limpar os dados salvos.', null);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Interface
+// ---------------------------------------------------------------------------
+
+class UIContainer {
+  constructor(title) {
+    this.container = document.createElement('div');
+    this.container.className = 'whatsapp-scraper-widget';
+    this.container.id = 'whatsapp-scraper-widget';
+
+    const header = document.createElement('div');
+    header.className = 'scraper-widget-header';
+
+    const titleElement = document.createElement('h3');
+    titleElement.textContent = title;
+    header.appendChild(titleElement);
+
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'scraper-close-button';
+    closeButton.textContent = '✖';
+    closeButton.title = 'Fechar WhatsApp 20x';
+    closeButton.setAttribute('aria-label', 'Fechar WhatsApp 20x');
+    closeButton.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.hide();
+    });
+
+    this.container.appendChild(header);
+    this.container.appendChild(closeButton);
+    document.body.appendChild(this.container);
+
+    this.createReopenButton();
+  }
+
+  appendChild(element) {
+    this.container.appendChild(element);
+  }
+
+  hide() {
+    this.container.classList.add('hidden');
+    const reopenBtn = document.getElementById('scraper-reopen-button');
+    if (reopenBtn) reopenBtn.classList.remove('hidden');
+  }
+
+  show() {
+    this.container.classList.remove('hidden');
+    const reopenBtn = document.getElementById('scraper-reopen-button');
+    if (reopenBtn) reopenBtn.classList.add('hidden');
+  }
+
+  createReopenButton() {
+    const reopenButton = document.createElement('button');
+    reopenButton.type = 'button';
+    reopenButton.id = 'scraper-reopen-button';
+    reopenButton.className = 'scraper-reopen-button hidden';
+    reopenButton.textContent = 'W';
+    reopenButton.title = 'Abrir WhatsApp 20x';
+    reopenButton.setAttribute('aria-label', 'Abrir WhatsApp 20x');
+    reopenButton.addEventListener('click', () => this.show());
+    document.body.appendChild(reopenButton);
+  }
+}
+
+/**
+ * Cria um botão com rótulo e contador embutido.
+ * @param {string} label texto antes do contador
+ * @param {string} counterId id do span do contador
+ * @param {string} background cor de fundo
+ * @param {Function} onClick handler de clique
+ */
+function createCounterButton(label, counterId, background, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'whatsapp-scraper-widget-button';
+  button.style.backgroundColor = background;
+  button.addEventListener('click', onClick);
+
+  button.appendChild(document.createTextNode(`${label} (`));
+
+  const counter = document.createElement('span');
+  counter.id = counterId;
+  counter.textContent = '0';
+  button.appendChild(counter);
+
+  button.appendChild(document.createTextNode(')'));
+
+  return button;
+}
+
+function createCta(text, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'whatsapp-scraper-widget-button';
+  button.textContent = text;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function createSpacer() {
+  const spacer = document.createElement('div');
+  spacer.className = 'scraper-spacer';
+  return spacer;
+}
+
+/** Recalcula os três contadores em uma única passada pelo dataset. */
+const updateCounter = debounce(() => {
+  if (!memberListStore) return;
+
+  const { total, filtered, nameless } = memberListStore.counts();
+
+  const totalEl = document.getElementById(COUNTER_ID);
+  const filteredEl = document.getElementById(`${COUNTER_ID}-filtered`);
+  const namelessEl = document.getElementById(`${COUNTER_ID}-noname`);
+
+  if (totalEl) totalEl.textContent = String(total);
+  if (filteredEl) filteredEl.textContent = String(filtered);
+  if (namelessEl) namelessEl.textContent = String(nameless);
+}, COUNTER_DEBOUNCE_MS);
+
+function downloadHandler(label, buildRows, suffix) {
+  return () => {
+    try {
+      const rows = buildRows();
+      if (rows.length <= 1) {
+        notifyUser('Nada para exportar ainda.');
+        return;
+      }
+      exportToCsv(rows, `${EXPORT_NAME}-${suffix}-${fileTimestamp()}.csv`);
+      console.log(`[WhatsApp 20x] CSV ${label} exportado (${rows.length - 1} linha(s)).`);
+    } catch (error) {
+      handleError(`export:${suffix}`, error, `Falha ao exportar o CSV ${label}.`, null);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Extração de contatos
+// ---------------------------------------------------------------------------
+
+/**
+ * Extrai nome e telefone de um `[role="listitem"]` do modal de participantes.
+ * Tolerante à estrutura de DOM: tenta várias estratégias em ordem de confiança,
+ * porque o WhatsApp Web muda as classes com frequência.
+ * @returns {{name: string, phone: string}|null}
+ */
+function extractContact(listItem) {
+  let profileName = '';
+  let profilePhone = '';
+
+  // 1) Identificador principal: span com title que não é o "recado".
+  const titleElems = listItem.querySelectorAll('span[title]:not(.copyable-text)');
+  for (const elem of titleElems) {
+    const text = cleanName(elem.getAttribute('title') || elem.textContent);
+    if (text && !NOT_A_NAME.has(text)) {
+      profileName = text;
+      break;
+    }
+  }
+
+  // 2) Fallback: qualquer span com dir="auto" e texto útil.
+  if (!profileName) {
+    const dirSpans = listItem.querySelectorAll('span[dir="auto"]');
+    for (const elem of dirSpans) {
+      const text = cleanName(elem.textContent);
+      if (text && !NOT_A_NAME.has(text)) {
+        profileName = text;
+        break;
+      }
+    }
+  }
+
+  if (!profileName) return null;
+
+  // Se o identificador principal já é um telefone, ele É o telefone —
+  // e o nome real, se existir, está em outro span.
+  if (PHONE_REGEX.test(profileName)) {
+    profilePhone = profileName;
+    profileName = '';
+
+    const candidates = listItem.querySelectorAll('span');
+    for (const elem of candidates) {
+      const text = cleanName(elem.textContent);
+      if (!text || NOT_A_NAME.has(text)) continue;
+      if (text === profilePhone || PHONE_REGEX.test(text)) continue;
+      profileName = text;
+      break;
+    }
+  }
+
+  // Procura o telefone em qualquer span com formato numérico.
+  if (!profilePhone) {
+    const candidates = listItem.querySelectorAll('span');
+    for (const elem of candidates) {
+      const text = (elem.textContent || '').trim();
+      if (text && text !== profileName && PHONE_REGEX.test(text)) {
+        profilePhone = text;
+        break;
+      }
+    }
+  }
+
+  if (!profileName && !profilePhone) return null;
+
+  return { name: profileName, phone: profilePhone };
+}
+
+/**
+ * Varre TODOS os itens atualmente renderizados no modal e registra os novos.
+ *
+ * Esta é a correção central do "às vezes pega, às vezes não": a versão anterior
+ * só reagia a mutações de atributo, então os participantes que já estavam no DOM
+ * quando o modal abriu nunca eram capturados. Varrer é barato porque o WhatsApp
+ * usa scroll virtual — só existem algumas dezenas de itens por vez.
+ */
+function sweepVisibleMembers() {
+  if (!memberListStore) return;
+
+  // Sem container anexado não há como distinguir participantes de conversas
+  // da barra lateral — varrer o documento inteiro contaminaria a coleta.
+  if (!attachedContainer || !attachedContainer.isConnected) return;
+
+  const listItems = attachedContainer.querySelectorAll('[role="listitem"]');
+  if (listItems.length === 0) return;
+
+  let changed = false;
+  let lastName = '';
+
+  for (const listItem of listItems) {
+    let contact;
+    try {
+      contact = extractContact(listItem);
+    } catch (error) {
+      // Um item malformado não pode derrubar a varredura inteira.
+      console.error('[WhatsApp 20x][extractContact]:', error);
+      continue;
+    }
+
+    if (!contact) continue;
+
+    const { name, phone } = contact;
+
+    if (name && shouldExclude(name)) continue;
+    if (!name && phone && shouldExclude(phone)) continue;
+
+    // Descarta cabeçalhos de seção e separadores.
+    if (!isLikelyMemberRow(name, phone)) continue;
+
+    const identifier = contactKey(phone, name);
+    if (!identifier) continue;
+
+    const data = phone
+      ? { phoneNumber: phone, ...(name ? { name } : {}) }
+      : { phoneNumber: name };
+
+    if (memberListStore.upsert(identifier, data)) {
+      changed = true;
+      lastName = name || phone;
+    }
+  }
+
+  if (changed) {
+    updateCounter();
+    persistContacts();
+    if (!autoScrollActive) {
+      updateStatus(`Coletando: ${lastName}`);
+    }
+  }
+
+  return changed;
+}
+
+const scheduleSweep = debounce(sweepVisibleMembers, SWEEP_DEBOUNCE_MS);
+
+// ---------------------------------------------------------------------------
+// Rolagem automática
+// ---------------------------------------------------------------------------
+
+/**
+ * Espera a lista virtual renderizar as novas linhas.
+ * Dois requestAnimationFrame garantem que o frame de layout passou; o timeout
+ * cobre o preenchimento assíncrono das linhas. Sem isso, blocos inteiros de
+ * contatos são pulados entre um passo de rolagem e o seguinte.
+ */
+function settleAfterScroll() {
+  return new Promise(resolve => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => setTimeout(resolve, AUTOSCROLL_SETTLE_MS));
+    });
+  });
+}
+
+/**
+ * Avança o scroller em `step` px, com fallbacks.
+ * A lista do WhatsApp às vezes ignora escrita direta em scrollTop e só responde
+ * a um evento de wheel real.
+ * @returns {Promise<boolean>} true se a posição mudou
+ */
+async function advanceScroller(scroller, step) {
+  const before = scroller.scrollTop;
+
+  scroller.scrollTop = before + step;
+  await settleAfterScroll();
+  if (scroller.scrollTop !== before) return true;
+
+  scroller.dispatchEvent(new WheelEvent('wheel', {
+    deltaY: step,
+    deltaMode: 0,
+    bubbles: true,
+    cancelable: true
+  }));
+  await settleAfterScroll();
+  if (scroller.scrollTop !== before) return true;
+
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo(0, before + step);
+    await settleAfterScroll();
+  }
+
+  return scroller.scrollTop !== before;
+}
+
+function isAtBottom(scroller) {
+  return scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 5;
+}
+
+/**
+ * Rola a lista de participantes do topo ao fim, acumulando os contatos.
+ *
+ * Necessário porque a lista é virtualizada: só ~20-30 das centenas de linhas
+ * existem no DOM ao mesmo tempo, e as que saem da viewport são destruídas.
+ * Não adianta rolar até o fim e varrer — no fim só restam as últimas linhas.
+ */
+async function collectAll(button) {
+  if (autoScrollActive) {
+    autoScrollActive = false;
+    return;
+  }
+
+  const scroller = attachedScroller;
+
+  if (!scroller || !scroller.isConnected) {
+    notifyUser('Abra a lista de participantes do grupo primeiro.');
+    return;
+  }
+
+  autoScrollActive = true;
+  button.textContent = '⏹ Parar coleta';
+
+  const startedWith = memberListStore.size;
+
+  try {
+    scroller.scrollTop = 0;
+    await settleAfterScroll();
+    sweepVisibleMembers();
+
+    let idleRounds = 0;
+    let lastSize = memberListStore.size;
+
+    for (let round = 0; round < AUTOSCROLL_MAX_ROUNDS && autoScrollActive; round++) {
+      const step = Math.max(200, Math.floor(scroller.clientHeight * AUTOSCROLL_STEP_RATIO));
+      const moved = await advanceScroller(scroller, step);
+
+      sweepVisibleMembers();
+
+      if (memberListStore.size === lastSize) {
+        idleRounds++;
+      } else {
+        idleRounds = 0;
+        lastSize = memberListStore.size;
+      }
+
+      updateStatus(`Coletando... ${memberListStore.size} contato(s)`);
+
+      // Para só quando a lista esgotou E estamos de fato no fim.
+      if (idleRounds >= AUTOSCROLL_IDLE_ROUNDS && isAtBottom(scroller)) break;
+
+      // Scroller travado e sem contatos novos: insistir não leva a lugar algum.
+      if (!moved && idleRounds >= AUTOSCROLL_IDLE_ROUNDS) break;
+    }
+
+    const collected = memberListStore.size - startedWith;
+    updateStatus(
+      autoScrollActive
+        ? `Coleta concluída: ${memberListStore.size} contato(s) (+${collected})`
+        : `Coleta interrompida: ${memberListStore.size} contato(s)`
+    );
+  } catch (error) {
+    handleError('collectAll', error, 'Erro durante a coleta automática.', null);
+  } finally {
+    autoScrollActive = false;
+    button.textContent = '▶ Coletar tudo';
+    updateCounter();
+    persistContacts();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Detecção do modal de participantes
+// ---------------------------------------------------------------------------
+
+/**
+ * Encontra o ancestral que realmente rola.
+ *
+ * O pai direto do listitem é um spacer de altura total (scrollHeight ===
+ * clientHeight, overflow hidden) usado pelo scroll virtual para posicionar as
+ * linhas em `position: absolute`. Escrever scrollTop nele não faz nada — e era
+ * por isso que a rolagem não avançava e a lista parecia ter acabado.
+ * O scroller de verdade fica alguns níveis acima.
+ */
+function findScrollParent(element) {
+  let node = element;
+  while (node && node !== document.body) {
+    const overflowY = window.getComputedStyle(node).overflowY;
+    // A margem de 20px evita casar com o spacer, cuja diferença é zero.
+    if (overflowY !== 'visible' && node.scrollHeight > node.clientHeight + 20) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/**
+ * A lista de conversas da barra lateral também usa [role="listitem"].
+ * Coletá-la encheria o CSV com nomes de conversa em vez de participantes.
+ */
+function isChatSidebar(element) {
+  return Boolean(element.closest('#pane-side')) || element.id === 'pane-side';
+}
+
+/**
+ * Localiza o container que agrupa os `[role="listitem"]` dos participantes.
+ * Cobre tanto o modal ("Ver todos") quanto o painel lateral de dados do grupo,
+ * escolhendo sempre o candidato com mais itens renderizados.
+ * @returns {Element|null}
+ */
+function findMemberListContainer() {
+  const candidates = [
+    ...document.querySelectorAll('[data-animate-modal-body="true"]'),
+    ...document.querySelectorAll('[role="dialog"]'),
+    ...document.querySelectorAll('[role="list"]')
+  ];
+
+  let best = null;
+  let bestCount = 0;
+
+  for (const candidate of candidates) {
+    if (isChatSidebar(candidate)) continue;
+
+    const items = candidate.querySelectorAll('[role="listitem"]');
+    if (items.length === 0) continue;
+    if (isChatSidebar(items[0])) continue;
+
+    if (items.length > bestCount) {
+      bestCount = items.length;
+      best = { root: candidate, firstItem: items[0] };
+    }
+  }
+
+  if (!best) return null;
+
+  const scroller = findScrollParent(best.firstItem);
+  const validScroller = scroller && !isChatSidebar(scroller) ? scroller : null;
+
+  // A raiz da varredura precisa conter TODOS os listitems renderizados; o
+  // scroller serve, e ainda dá o listener de scroll de graça. Sem ele, cai no
+  // spacer (pai direto), que também contém todas as linhas mas não rola.
+  return {
+    root: validScroller || best.firstItem.parentElement || best.root,
+    scroller: validScroller
+  };
+}
+
+function detachFromModal() {
+  if (modalObserver) {
+    modalObserver.disconnect();
+    modalObserver = null;
+  }
+
+  if (attachedScroller && attachedScrollHandler) {
+    attachedScroller.removeEventListener('scroll', attachedScrollHandler);
+  }
+
+  attachedScrollHandler = null;
+  attachedScroller = null;
+
+  if (attachedContainer) {
+    attachedContainer = null;
+    updateStatus('Aguardando abertura da lista de participantes...');
+  }
+}
+
+/**
+ * Anexa (ou reanexa) a coleta à lista de participantes.
+ * Idempotente: se já estamos no mesmo container, não faz nada — a versão
+ * anterior empilhava um MutationObserver novo a cada chamada.
+ */
+function attachToModal() {
+  const found = findMemberListContainer();
+
+  if (!found) {
+    if (attachedContainer && !attachedContainer.isConnected) {
+      detachFromModal();
     }
     return;
   }
-  
-  console.log('⚡ WhatsApp 20x: Carregando automaticamente...');
-  
-  // Carrega o scraper diretamente, sem mostrar o modal
-  setTimeout(() => {
-    initializeScraper();
-    console.log('✅ WhatsApp 20x: Carregado automaticamente!');
-  }, 500);
+
+  const { root, scroller } = found;
+
+  if (root === attachedContainer && attachedContainer.isConnected) {
+    // Já observando este container: só garante que nada novo escapou.
+    scheduleSweep();
+    return;
+  }
+
+  detachFromModal();
+  attachedContainer = root;
+  attachedScroller = scroller;
+
+  modalObserver = new MutationObserver(() => scheduleSweep());
+  modalObserver.observe(root, {
+    attributes: true,
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
+
+  // Scroll virtual pode reciclar nós sem gerar mutação observável no lote certo.
+  if (attachedScroller) {
+    attachedScrollHandler = () => scheduleSweep();
+    attachedScroller.addEventListener('scroll', attachedScrollHandler, { passive: true });
+  }
+
+  updateStatus(
+    attachedScroller
+      ? 'Lista detectada — use "Coletar tudo"'
+      : 'Lista detectada — role a lista para coletar'
+  );
+
+  // Varredura imediata: captura quem já estava renderizado.
+  sweepVisibleMembers();
 }
 
-// Função para reabrir o modal (pode ser chamada externamente)
-window.reopenWhatsAppScraper = function() {
+const scheduleAttach = debounce(attachToModal, SWEEP_DEBOUNCE_MS);
+
+function startMonitoring() {
+  if (appObserver) return;
+
+  const root = document.getElementById('app') || document.body;
+
+  appObserver = new MutationObserver(mutations => {
+    for (const mutation of mutations) {
+      if (mutation.type !== 'childList') continue;
+      if (mutation.addedNodes.length === 0 && mutation.removedNodes.length === 0) continue;
+      // Não inspecionamos o nó: modais aparecem em etapas e checar o conteúdo
+      // no instante da inserção é justamente o que fazia a coleta falhar.
+      scheduleAttach();
+      return;
+    }
+  });
+
+  appObserver.observe(root, { childList: true, subtree: true });
+
+  updateStatus('Monitorando página...');
+
+  // O modal pode já estar aberto quando a extensão inicializa.
+  attachToModal();
+}
+
+// ---------------------------------------------------------------------------
+// Inicialização
+// ---------------------------------------------------------------------------
+
+async function initializeScraper() {
+  if (uiWidget && document.getElementById('whatsapp-scraper-widget')) {
+    uiWidget.show();
+    return;
+  }
+
+  console.log('[WhatsApp 20x] Inicializando...');
+
+  memberListStore = new WhatsAppStorage();
+
+  await loadSettings();
+  await loadContacts();
+
+  uiWidget = new UIContainer('WhatsApp 20x');
+
+  const btnCollectAll = createCta('▶ Coletar tudo', () => collectAll(btnCollectAll));
+  btnCollectAll.id = 'scraper-collect-all';
+  btnCollectAll.title = 'Rola a lista inteira e coleta todos os participantes';
+  uiWidget.appendChild(btnCollectAll);
+  uiWidget.appendChild(createSpacer());
+
+  const btnFiltered = createCounterButton(
+    '📋 Filtrado',
+    `${COUNTER_ID}-filtered`,
+    '#25D366',
+    downloadHandler('filtrado', () => memberListStore.toCsvDataFiltered(), 'filtrado')
+  );
+
+  const btnRaw = createCounterButton(
+    '📄 Completo',
+    COUNTER_ID,
+    '#128C7E',
+    downloadHandler('completo', () => memberListStore.toCsvDataRaw(), 'completo')
+  );
+
+  const btnNoName = createCounterButton(
+    '📱 Sem Nome',
+    `${COUNTER_ID}-noname`,
+    '#E67E22',
+    downloadHandler('sem nome', () => memberListStore.toCsvDataNoName(), 'sem-nome')
+  );
+
+  uiWidget.appendChild(btnFiltered);
+  uiWidget.appendChild(btnRaw);
+  uiWidget.appendChild(btnNoName);
+  uiWidget.appendChild(createSpacer());
+
+  const btnReset = createCta('Reset', async () => {
+    const { total } = memberListStore.counts();
+    if (total > 0 && !window.confirm(`Apagar os ${total} contato(s) coletados?`)) {
+      return;
+    }
+    memberListStore.clear();
+    persistContacts.cancel();
+    await clearPersistedContacts();
+    updateCounter();
+    notifyUser('Dados apagados.');
+  });
+
+  uiWidget.appendChild(btnReset);
+  uiWidget.appendChild(createSpacer());
+
+  const statusText = document.createElement('span');
+  statusText.id = 'scraper-status';
+  statusText.textContent = 'Aguardando abertura de grupo...';
+  uiWidget.appendChild(statusText);
+
+  updateCounter();
+  startMonitoring();
+
+  console.log('[WhatsApp 20x] Pronto. Abra um grupo e toque no nome para ver os participantes.');
+}
+
+/** Permite reabrir o widget a partir do console ou de outro script. */
+window.reopenWhatsAppScraper = function () {
   if (uiWidget && document.getElementById('whatsapp-scraper-widget')) {
     uiWidget.show();
   } else {
@@ -58,667 +1072,30 @@ window.reopenWhatsAppScraper = function() {
   }
 };
 
-// Funções utilitárias
-function exportToCsv(data, filename) {
-  const csv = data.map(row => row.join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-class ListStorage {
-  constructor() {
-    this.data = [];
-  }
-  
-  add(item) {
-    this.data.push(item);
-  }
-  
-  getAll() {
-    return this.data;
-  }
-  
-  clear() {
-    this.data = [];
-  }
-  
-  get length() {
-    return this.data.length;
-  }
-}
-
-class UIContainer {
-  constructor(title) {
-    this.container = document.createElement('div');
-    this.container.className = 'whatsapp-scraper-widget';
-    this.container.id = 'whatsapp-scraper-widget';
-    
-    // Criar estrutura com botão de fechar
-    const header = document.createElement('div');
-    header.style.position = 'relative';
-    header.style.paddingRight = '30px';
-    
-    const titleElement = document.createElement('h3');
-    titleElement.textContent = title;
-    header.appendChild(titleElement);
-    
-    // Botão de fechar
-    const closeButton = document.createElement('button');
-    closeButton.type = 'button';
-    closeButton.className = 'scraper-close-button';
-    closeButton.textContent = '✖'; // Usando X mais visível
-    closeButton.title = 'Fechar WhatsApp 20x';
-    closeButton.setAttribute('aria-label', 'Fechar modal');
-    
-    // Adicionar múltiplos event listeners para garantir funcionamento
-    closeButton.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.hide();
-    }, true);
-    
-    // Backup com mousedown para garantir resposta
-    closeButton.addEventListener('mousedown', (e) => {
-      if (e.button === 0) { // Apenas botão esquerdo do mouse
-        e.preventDefault();
-      }
-    });
-    
-    // Adicionar header primeiro, depois o botão de fechar por cima
-    this.container.appendChild(header);
-    this.container.appendChild(closeButton);
-    document.body.appendChild(this.container);
-    
-    // Criar botão de reabrir
-    this.createReopenButton();
-  }
-  
-  appendChild(element) {
-    this.container.appendChild(element);
-  }
-  
-  hide() {
-    this.container.classList.add('hidden');
-    const reopenBtn = document.getElementById('scraper-reopen-button');
-    if (reopenBtn) {
-      reopenBtn.classList.remove('hidden');
-    }
-  }
-  
-  show() {
-    this.container.classList.remove('hidden');
-    const reopenBtn = document.getElementById('scraper-reopen-button');
-    if (reopenBtn) {
-      reopenBtn.classList.add('hidden');
-    }
-  }
-  
-  createReopenButton() {
-    const reopenButton = document.createElement('button');
-    reopenButton.id = 'scraper-reopen-button';
-    reopenButton.className = 'scraper-reopen-button hidden';
-    reopenButton.innerHTML = 'W';
-    reopenButton.title = 'Abrir WhatsApp 20x';
-    reopenButton.onclick = () => this.show();
-    document.body.appendChild(reopenButton);
-  }
-}
-
-function createCta(text, onClick) {
-  const button = document.createElement('button');
-  button.textContent = text;
-  button.className = 'whatsapp-scraper-widget-button';
-  if (typeof onClick === 'string') {
-    button.appendChild(document.createTextNode(text));
-  } else {
-    button.onclick = onClick;
-  }
-  return button;
-}
-
-function createSpacer() {
-  const spacer = document.createElement('div');
-  spacer.style.height = '10px';
-  return spacer;
-}
-
-function createTextSpan(text) {
-  const span = document.createElement('span');
-  span.textContent = text;
-  span.style.display = 'inline';
-  span.style.margin = '0';
-  return span;
-}
-
-class HistoryTracker {
-  constructor() {
-    this.history = new Set();
-  }
-  
-  has(id) {
-    return this.history.has(id);
-  }
-  
-  track(id) {
-    this.history.add(id);
-  }
-}
-
-// Funções do scraper
-function cleanName(name) {
-  const nameClean = name.trim();
-  // Remove ~ no início do nome, com ou sem espaço
-  return nameClean.replace(/^~\s*/, '');
-}
-
-class WhatsAppStorage extends ListStorage {
-  get headers() {
-    return [
-      'Phone Number',
-      'Name'
-    ];
-  }
-  
-  itemToRow(item) {
-    // Ignorar contatos sem nome ou contatos próprios
-    if (shouldExclude(item.name)) {
-      return null; // Retornar null para indicar que deve ser ignorado
-    }
-    
-    // Também verificar se o phoneNumber contém um nome excluído (quando não há telefone real)
-    if (!item.name && item.phoneNumber) {
-      // Se não tem nome mas o phoneNumber não parece ser um telefone (não começa com + ou número)
-      if (!/^[+\d]/.test(item.phoneNumber)) {
-        // É um nome no campo phoneNumber, verificar se deve excluir
-        if (shouldExclude(item.phoneNumber)) {
-          return null;
-        }
-      } else {
-        // É um número sem nome, filtrar
-        return null;
-      }
-    }
-    
-    return [
-      item.phoneNumber || "",
-      item.name ? item.name.split(' ')[0] : ""
-    ];
-  }
-  
-  toCsvData() {
-    const rows = [this.headers];
-    this.data.forEach(item => {
-      const row = this.itemToRow(item);
-      if (row) { // Apenas adicionar se não for null
-        rows.push(row);
-      }
-    });
-    return rows;
-  }
-  
-  // Novo método para exportar todos os contatos sem filtro
-  toCsvDataRaw() {
-    const rows = [this.headers];
-    this.data.forEach(item => {
-      rows.push([
-        item.phoneNumber || "",
-        item.name || "" // Nome completo sem tratamento
-      ]);
-    });
-    return rows;
-  }
-  
-  // Novo método para exportar apenas contatos sem nome (números apenas)
-  toCsvDataNoName() {
-    const rows = [["Phone Number"]]; // Apenas coluna de telefone
-    this.data.forEach(item => {
-      // Incluir apenas se não tem nome ou se o nome está na lista de exclusão
-      if (!item.name || item.name.trim() === '') {
-        // Verificar se phoneNumber é realmente um número (começa com + ou dígito)
-        if (item.phoneNumber && /^[+\d]/.test(item.phoneNumber)) {
-          rows.push([item.phoneNumber]);
-        }
-      }
-    });
-    return rows;
-  }
-  
-  addElem(id, data, update) {
-    const existing = this.data.find(item => item.profileId === id);
-    if (existing && update) {
-      Object.assign(existing, data);
-    } else if (!existing) {
-      this.add(data);
-    }
-  }
-  
-  getCount() {
-    return this.length;
-  }
-}
-
-async function updateCounter() {
-  const tracker = document.getElementById(counterId);
-  const trackerFiltered = document.getElementById(counterId + '-filtered');
-  const trackerNoName = document.getElementById(counterId + '-noname');
-  
-  if(tracker){
-    const countValue = memberListStore.getCount();
-    tracker.textContent = countValue.toString();
-  }
-  
-  if(trackerFiltered){
-    // Contar apenas os contatos que passariam pelo filtro
-    let filteredCount = 0;
-    memberListStore.data.forEach(item => {
-      const row = memberListStore.itemToRow(item);
-      if (row) filteredCount++;
-    });
-    trackerFiltered.textContent = filteredCount.toString();
-  }
-  
-  if(trackerNoName){
-    // Contar apenas contatos sem nome
-    let noNameCount = 0;
-    memberListStore.data.forEach(item => {
-      if (!item.name || item.name.trim() === '') {
-        if (item.phoneNumber && /^[+\d]/.test(item.phoneNumber)) {
-          noNameCount++;
-        }
-      }
-    });
-    trackerNoName.textContent = noNameCount.toString();
-  }
-}
-
-// Carrega o scraper quando o botão é clicado
-// NOTA: Esta função não é mais usada pois o scraper carrega automaticamente
-// Mantida para compatibilidade/referência
-function loadScraper() {
-  const button = document.getElementById('whatsapp-scraper-button');
-  const container = document.getElementById('whatsapp-scraper-container');
-  
-  // Muda o texto do botão
-  button.textContent = 'Carregando...';
-  button.disabled = true;
-  
-  console.log('🚀 WhatsApp 20x: Carregando...');
-  
-  // Inicializa o scraper diretamente
-  setTimeout(() => {
+/**
+ * Aguarda o container da aplicação existir.
+ * Usa MutationObserver em vez de setInterval (CLAUDE.md proíbe polling aqui).
+ */
+function waitForWhatsApp() {
+  if (document.getElementById('app')) {
     initializeScraper();
-    
-    // Remove o botão após carregar
-    setTimeout(() => {
-      container.style.opacity = '0';
-      container.style.transition = 'opacity 0.3s ease-out';
-      setTimeout(() => container.remove(), 300);
-    }, 1000);
-  }, 100);
-}
-
-// Inicializa o scraper
-function initializeScraper() {
-  console.log('🚀 WhatsApp 20x: Inicializando...');
-  
-  // Se já existe o widget, apenas mostra
-  if (uiWidget && document.getElementById('whatsapp-scraper-widget')) {
-    uiWidget.show();
-    return;
-  }
-  
-  // Inicializar o storage
-  memberListStore = new WhatsAppStorage();
-  
-  // Criar UI
-  uiWidget = new UIContainer('WhatsApp 20x');
-  
-  // History Tracker
-  logsTracker = new HistoryTracker();
-  
-  // Button Download Tratado (Filtrado)
-  const btnDownloadFiltered = createCta('Download Filtrado');
-  btnDownloadFiltered.onclick = async function() {
-    const timestamp = new Date().toISOString();
-    const data = memberListStore.toCsvData();
-    try{
-      exportToCsv(data, exportName + '-filtrado-' + timestamp + '.csv');
-      console.log('✅ CSV filtrado exportado com sucesso');
-    }catch(err){
-      console.error('Error while generating filtered export');
-      console.log(err.stack);
-    }
-  };
-  
-  // Criar span para o contador dentro do botão filtrado
-  btnDownloadFiltered.innerHTML = '';
-  btnDownloadFiltered.appendChild(createTextSpan('📋 Filtrado ('));
-  const counterSpanFiltered = createTextSpan('0');
-  counterSpanFiltered.id = counterId + '-filtered';
-  btnDownloadFiltered.appendChild(counterSpanFiltered);
-  btnDownloadFiltered.appendChild(createTextSpan(')')); 
-  btnDownloadFiltered.style.backgroundColor = '#25D366';
-  btnDownloadFiltered.style.marginBottom = '5px';
-  
-  // Button Download Completo (Sem Tratamento)
-  const btnDownloadRaw = createCta('Download Completo');
-  btnDownloadRaw.onclick = async function() {
-    const timestamp = new Date().toISOString();
-    const data = memberListStore.toCsvDataRaw();
-    try{
-      exportToCsv(data, exportName + '-completo-' + timestamp + '.csv');
-      console.log('✅ CSV completo exportado com sucesso');
-    }catch(err){
-      console.error('Error while generating raw export');
-      console.log(err.stack);
-    }
-  };
-  
-  // Criar span para o contador dentro do botão completo
-  btnDownloadRaw.innerHTML = '';
-  btnDownloadRaw.appendChild(createTextSpan('📄 Completo ('));
-  const counterSpan = createTextSpan('0');
-  counterSpan.id = counterId;
-  btnDownloadRaw.appendChild(counterSpan);
-  btnDownloadRaw.appendChild(createTextSpan(')'));
-  btnDownloadRaw.style.backgroundColor = '#128C7E';
-  btnDownloadRaw.style.marginBottom = '5px';
-  
-  // Button Download Sem Nome (Apenas Números)
-  const btnDownloadNoName = createCta('Download Sem Nome');
-  btnDownloadNoName.onclick = async function() {
-    const timestamp = new Date().toISOString();
-    const data = memberListStore.toCsvDataNoName();
-    try{
-      exportToCsv(data, exportName + '-sem-nome-' + timestamp + '.csv');
-      console.log('✅ CSV sem nome exportado com sucesso');
-    }catch(err){
-      console.error('Error while generating no-name export');
-      console.log(err.stack);
-    }
-  };
-  
-  // Criar span para o contador dentro do botão sem nome
-  btnDownloadNoName.innerHTML = '';
-  btnDownloadNoName.appendChild(createTextSpan('📱 Sem Nome ('));
-  const counterSpanNoName = createTextSpan('0');
-  counterSpanNoName.id = counterId + '-noname';
-  btnDownloadNoName.appendChild(counterSpanNoName);
-  btnDownloadNoName.appendChild(createTextSpan(')'));
-  btnDownloadNoName.style.backgroundColor = '#E67E22';
-  btnDownloadNoName.style.marginBottom = '10px';
-  
-  uiWidget.appendChild(btnDownloadFiltered);
-  uiWidget.appendChild(btnDownloadRaw);
-  uiWidget.appendChild(btnDownloadNoName);
-  uiWidget.appendChild(createSpacer());
-  
-  // Button Reset
-  const btnReinit = createCta('Reset');
-  btnReinit.onclick = async function() {
-    memberListStore.clear();
-    await updateCounter();
-    console.log('Data cleared');
-  };
-  
-  uiWidget.appendChild(btnReinit);
-  
-  // Button Ir para Disparador
-  const btnDisparador = createCta('Ir para Disparador');
-  btnDisparador.style.marginTop = '10px';
-  btnDisparador.style.backgroundColor = '#0066cc';
-  btnDisparador.style.color = 'white';
-  btnDisparador.onclick = function() {
-    // Abrir o disparador em nova aba
-    window.open('https://agentesintegrados.com.br', '_blank');
-    console.log('Redirecionando para o disparador...');
-  };
-  
-  uiWidget.appendChild(btnDisparador);
-  uiWidget.appendChild(createSpacer());
-  
-  // Status text
-  const statusText = createTextSpan('Aguardando abertura de grupo...');
-  statusText.id = 'scraper-status';
-  statusText.style.display = 'block';
-  uiWidget.appendChild(statusText);
-  
-  // Start monitoring
-  startMonitoring();
-  
-  console.log('✅ WhatsApp 20x: Interface criada com sucesso!');
-  console.log('📌 Abra um grupo e clique no nome para ver os membros');
-}
-
-function listenModalChanges() {
-  const modalElems = document.querySelectorAll('[data-animate-modal-body="true"]');
-  if(modalElems.length === 0) return;
-
-  const modalElem = modalElems[0];
-
-  // CORRIGIDO: Encontrar o container de scroll correto
-  // O WhatsApp agora coloca listitems como divs com height inline,
-  // então o container é o div pai que contém TODOS os listitems
-  let targetNode = null;
-
-  // Estratégia 1: Encontrar o pai do primeiro listitem dentro do modal
-  const firstListitem = modalElem.querySelector('[role="listitem"]');
-  if (firstListitem) {
-    targetNode = firstListitem.parentElement;
-    console.log('[WhatsApp 20x] Container encontrado via pai de listitem, filhos:', targetNode.children.length);
-  }
-
-  // Estratégia 2 (fallback): div com height grande (container virtual scroll)
-  if (!targetNode) {
-    const heightDivs = modalElem.querySelectorAll("div[style*='height']");
-    for (let i = 0; i < heightDivs.length; i++) {
-      const div = heightDivs[i];
-      // Container real tem muitos filhos e não é um listitem
-      if (div.children.length > 5 && div.getAttribute('role') !== 'listitem') {
-        targetNode = div;
-        console.log('[WhatsApp 20x] Container encontrado via height div[' + i + '], filhos:', div.children.length);
-        break;
-      }
-    }
-  }
-
-  if(!targetNode) {
-    console.warn('[WhatsApp 20x] Container de scroll não encontrado!');
     return;
   }
 
-  const config = { attributes: true, childList: true, subtree: true };
+  const observer = new MutationObserver(() => {
+    if (!document.getElementById('app')) return;
+    observer.disconnect();
+    clearTimeout(fallbackTimer);
+    initializeScraper();
+  });
 
-  const callback = (mutationList) => {
-    for (const mutation of mutationList) {
-      if (mutation.type === "attributes") {
-        const target = mutation.target;
+  observer.observe(document.documentElement, { childList: true, subtree: true });
 
-        if(
-          target.tagName.toLowerCase() !== 'div' ||
-          target.getAttribute("role") !== "listitem"
-        ){
-          continue;
-        }
-
-        const listItem = target;
-
-        setTimeout(async () => {
-          let profileName = "";
-          let profilePhone = "";
-
-          // CORRIGIDO: Nova estrutura de spans do WhatsApp (abril 2026)
-          // Cada campo tem 2 spans: um de exibição (sem title) e um acessível (com title)
-          // Nome: span[title]:not(.copyable-text) com classe _ao3e
-          // Status: span[title].copyable-text com classe _ao3e
-          // Telefone: extraído do nome quando é um número, ou de spans com padrão de telefone
-
-          // Extrair nome/identificador principal
-          const titleElems = listItem.querySelectorAll("span[title]:not(.copyable-text)");
-          if(titleElems.length > 0){
-            const text = titleElems[0].textContent;
-            if(text){
-              const name = cleanName(text);
-              if(name && name.length > 0){
-                profileName = name;
-              }
-            }
-          }
-
-          if(profileName.length === 0){
-            return;
-          }
-
-          // CORRIGIDO: Extrair telefone com múltiplas estratégias
-          // Estratégia 1: Se o nome parece um telefone (+55...), ele É o telefone
-          const phoneRegex = /^\+?\d[\d\s\-()]{7,}$/;
-          if (phoneRegex.test(profileName.trim())) {
-            profilePhone = profileName.trim();
-            // Tentar encontrar nome real em outro lugar (span de exibição com fontSize maior)
-            const displaySpans = listItem.querySelectorAll('span[style*="--x-fontSize"]');
-            for (const ds of displaySpans) {
-              const txt = (ds.textContent || '').trim();
-              if (txt && txt !== profilePhone && !phoneRegex.test(txt) && txt !== 'default-contact-refreshed') {
-                profileName = cleanName(txt);
-                break;
-              }
-            }
-          }
-
-          // Estratégia 2: Procurar telefone em spans com padrão numérico
-          if (!profilePhone) {
-            const allSpans = listItem.querySelectorAll('span');
-            for (const span of allSpans) {
-              const txt = (span.textContent || '').trim();
-              if (phoneRegex.test(txt) && txt !== profileName) {
-                profilePhone = txt;
-                break;
-              }
-            }
-          }
-
-          // Estratégia 3 (legado): span com height inline sem title
-          if (!profilePhone) {
-            const phoneElems = listItem.querySelectorAll("span[style*='height']:not([title])");
-            if(phoneElems.length > 0){
-              const text = phoneElems[0].textContent;
-              if(text){
-                const textClean = text.trim();
-                if(textClean && textClean.length > 0){
-                  profilePhone = textClean;
-                }
-              }
-            }
-          }
-
-          if(profileName){
-            if (shouldExclude(profileName)) {
-              return;
-            }
-
-            const identifier = profilePhone ? profilePhone : profileName;
-            console.log('Encontrado:', profileName, profilePhone ? '(' + profilePhone + ')' : '');
-
-            const data = {};
-
-            if(profilePhone){
-              data.phoneNumber = profilePhone;
-              if(profileName){
-                data.name = profileName;
-              }
-            }else{
-              if(profileName){
-                data.phoneNumber = profileName;
-              }
-            }
-
-            memberListStore.addElem(
-              identifier, {
-                profileId: identifier,
-                ...data
-              },
-              true
-            );
-
-            updateCounter();
-            updateStatus('Coletando: ' + profileName);
-          }
-        }, 10);
-      }
-    }
-  };
-
-  modalObserver = new MutationObserver(callback);
-  modalObserver.observe(targetNode, config);
-  updateStatus('Modal detectado - Role a lista para coletar dados');
+  // Rede de segurança: se o #app nunca aparecer, sobe assim mesmo no body.
+  const fallbackTimer = setTimeout(() => {
+    observer.disconnect();
+    initializeScraper();
+  }, 30000);
 }
 
-function stopListeningModalChanges() {
-  if(modalObserver){
-    modalObserver.disconnect();
-    updateStatus('Coleta pausada');
-  }
-}
-
-function updateStatus(message) {
-  const statusText = document.getElementById('scraper-status');
-  if(statusText) {
-    statusText.textContent = message;
-  }
-}
-
-function startMonitoring() {
-  updateStatus('Monitorando página...');
-  
-  function bodyCallback(mutationList) {
-    for (const mutation of mutationList) {
-      if (mutation.type === "childList") {
-        if(mutation.addedNodes.length > 0){
-          mutation.addedNodes.forEach((node) => {
-            if(node.nodeType === Node.ELEMENT_NODE) {
-              // Detectar modal de membros (ambos seletores)
-              const hasModal = node.querySelectorAll('[data-animate-modal-body="true"]').length > 0;
-              const hasDialog = node.querySelectorAll('[role="dialog"]').length > 0 &&
-                               node.querySelectorAll('[role="listitem"]').length > 0;
-              if(hasModal || hasDialog){
-                setTimeout(() => {
-                  listenModalChanges();
-                }, 10);
-              }
-            }
-          });
-        }
-
-        if(mutation.removedNodes.length > 0){
-          mutation.removedNodes.forEach((node) => {
-            if(node.nodeType === Node.ELEMENT_NODE) {
-              const hasModal = node.querySelectorAll('[data-animate-modal-body="true"]').length > 0;
-              const hasDialog = node.querySelectorAll('[role="dialog"]').length > 0;
-              if(hasModal || hasDialog){
-                stopListeningModalChanges();
-              }
-            }
-          });
-        }
-      }
-    }
-  }
-  
-  const bodyConfig = { attributes: false, childList: true, subtree: true };
-  const bodyObserver = new MutationObserver(bodyCallback);
-  
-  const app = document.getElementById('app');
-  if(app){
-    bodyObserver.observe(app, bodyConfig);
-  } else {
-    bodyObserver.observe(document.body, bodyConfig);
-  }
-}
-
-// Inicia quando a página carregar
 waitForWhatsApp();
